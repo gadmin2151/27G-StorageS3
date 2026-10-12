@@ -239,6 +239,7 @@ small { font-size: 12px; }
 .notice.error .icon { color: var(--danger); }
 .notice p { margin-bottom: 0; }
 .notice a { color: inherit; text-decoration: underline; }
+.main > .notice:first-child { margin-bottom: 24px; }
 .section-gap { margin-top: 24px; }
 .loading { padding: 55px; text-align: center; color: var(--muted); font-size: 13px; }
 .loading::before { content: ""; display: block; width: 22px; height: 22px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; margin: 0 auto 13px; }

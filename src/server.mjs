@@ -116,6 +116,7 @@ export async function createApp(options = {}) {
     });
     await storage.init();
     auth = new Auth({ dataDir, secureCookies, setupToken: options.setupToken ?? process.env.SETUP_TOKEN });
+    await auth.initializeDefaults();
     const started = Date.now();
     const trustedProxyIPs = (options.trustedProxyIPs ?? process.env.TRUSTED_PROXY_IPS ?? '').split(',').map(value => value.trim()).filter(Boolean);
     if (trustedProxyIPs.some(ip => !isIP(ip))) throw new Error('TRUSTED_PROXY_IPS must be a comma-separated list of exact IP addresses');
@@ -123,6 +124,17 @@ export async function createApp(options = {}) {
       const peer = req.socket.remoteAddress?.replace(/^::ffff:/, '');
       const forwarded = req.headers['x-27g-client-ip'];
       return trustedProxyIPs.includes(peer) && typeof forwarded === 'string' && isIP(forwarded) ? forwarded : peer;
+    }
+    function localDefaultLogin(req) {
+      const loopback = address => {
+        const normalized = address?.replace(/^::ffff:/, '');
+        return normalized === '::1' || (isIP(normalized || '') === 4 && normalized.startsWith('127.'));
+      };
+      // The listener itself must be private: a loopback connection to a wildcard
+      // listener (including Docker/proxy traffic) does not grant this exception.
+      const address = server.address();
+      return !publicOrigin && trustedProxyIPs.length === 0 && typeof address === 'object' && address !== null &&
+        loopback(address.address) && loopback(req.socket.remoteAddress);
     }
     let maintenance = null;
     let background = null;
@@ -146,12 +158,13 @@ export async function createApp(options = {}) {
       }
       if (path === '/api/session' && method === 'GET') {
         const session = auth.session(req);
-        return json(res, 200, { authenticated: !!session, setupRequired: auth.setupRequired, ...(session ? { csrf: session.csrf, user: session.user } : {}) });
+        return json(res, 200, { authenticated: !!session, defaultCredentials: auth.defaultCredentials,
+          setupTokenRequired: auth.defaultCredentials && !localDefaultLogin(req), ...(session ? { csrf: session.csrf, user: session.user } : {}) });
       }
-      if (['/api/setup', '/api/login'].includes(path) && method === 'POST') {
-        const session = await auth[path.endsWith('setup') ? 'setup' : 'login'](await bodyJSON(req), clientIP(req));
+      if (path === '/api/login' && method === 'POST') {
+        const session = await auth.login(await bodyJSON(req), clientIP(req), { allowDefaultWithoutToken: localDefaultLogin(req) });
         res.setHeader('Set-Cookie', auth.cookie(session.token));
-        return json(res, 200, { user: session.user, csrf: session.csrf });
+        return json(res, 200, { user: session.user, csrf: session.csrf, defaultCredentials: auth.defaultCredentials });
       }
       const session = auth.requireSession(req, mutation);
       if (path === '/api/logout' && method === 'POST') {
@@ -160,11 +173,11 @@ export async function createApp(options = {}) {
       if (path === '/api/password' && method === 'PUT') {
         const updated = await auth.changePassword(session.user, await bodyJSON(req), clientIP(req));
         res.setHeader('Set-Cookie', auth.cookie(updated.token));
-        return json(res, 200, { user: updated.user, csrf: updated.csrf });
+        return json(res, 200, { user: updated.user, csrf: updated.csrf, defaultCredentials: auth.defaultCredentials });
       }
       if (path === '/api/status' && method === 'GET') {
         return json(res, 200, { ...await storage.status(), uptime: Math.floor((Date.now() - started) / 1000), version: VERSION,
-          endpoint: publicOrigin || `http://${req.headers.host}`, security: { secureCookies }, maintenance,
+          endpoint: publicOrigin || `http://${req.headers.host}`, security: { secureCookies, defaultCredentials: auth.defaultCredentials }, maintenance,
           automaticRepair: { intervalSeconds: scrubIntervalSeconds, lastRun: lastScrub ? new Date(lastScrub).toISOString() : null, nextRun: scrubIntervalSeconds ? new Date((lastScrub ?? started) + scrubIntervalSeconds * 1000).toISOString() : null },
           limitations: ['Один координатор: автоматического failover метаданных пока нет.', 'S3: базовые операции; multipart, versioning и IAM policy пока не поддерживаются.', 'Экспериментальная версия: нагрузочные испытания и независимый аудит ещё не проведены.'] });
       }
@@ -309,7 +322,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const port = int(process.env.PORT, 9000, 1, 65535, 'PORT'), host = process.env.HOST || '127.0.0.1';
   app.server.listen(port, host, () => {
     console.log(`27g-StoregeS3 ${VERSION}: http://${host}:${port}/console/`);
-    if (app.auth.setupRequired) console.log(`Initial setup token: ${app.auth.setupToken}`);
+    if (app.auth.defaultCredentials) console.log(`Initial setup token: ${app.auth.setupToken}`);
   });
   let stopping = false;
   for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, async () => {

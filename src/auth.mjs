@@ -6,6 +6,8 @@ import { promisify } from 'node:util';
 
 const derive = promisify(scrypt);
 const hash = value => createHash('sha256').update(value).digest('hex');
+export const DEFAULT_ADMIN_USERNAME = 'admin';
+export const DEFAULT_ADMIN_PASSWORD = 'admin!123';
 export const equal = (a, b) => {
   const aa = Buffer.from(String(a ?? '')), bb = Buffer.from(String(b ?? ''));
   return aa.length === bb.length && timingSafeEqual(aa, bb);
@@ -61,7 +63,21 @@ export class Auth {
     try { chmodSync(tokenPath, 0o600); } catch (err) { if (err.code !== 'ENOENT') throw err; }
     this.dummyHash = `${'0'.repeat(32)}:${'0'.repeat(128)}`;
   }
-  get setupRequired() { return !this.db.prepare('SELECT 1 FROM users LIMIT 1').get(); }
+  get defaultCredentials() { return this.preference('defaultCredentials', false) === true; }
+  async initializeDefaults() {
+    if (this.db.prepare('SELECT 1 FROM users LIMIT 1').get()) return;
+    const digest = await passwordHash(DEFAULT_ADMIN_PASSWORD);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      // Initialization must never replace an existing administrator or password.
+      if (!this.db.prepare('SELECT 1 FROM users LIMIT 1').get()) {
+        this.db.prepare('INSERT INTO users VALUES (?, ?)').run(DEFAULT_ADMIN_USERNAME, digest);
+        this.setPreference('defaultCredentials', true);
+        this.audit('admin.default_created', DEFAULT_ADMIN_USERNAME);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
   encrypt(secret) {
     const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', this.masterKey, iv);
     const data = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()]);
@@ -82,27 +98,19 @@ export class Auth {
     }
     if (++entry.count > 8 || this.busy >= 4) throw new ApiError(429, 'Слишком много попыток входа. Подождите минуту.');
   }
-  async setup({ username, password, setupToken }, ip) {
-    this.throttle(ip);
-    if (!this.setupRequired) throw new ApiError(409, 'Первоначальная настройка уже завершена.');
-    if (!equal(setupToken, this.setupToken)) throw new ApiError(403, 'Неверный токен первоначальной настройки.');
-    if (typeof username !== 'string' || !/^[a-zA-Z0-9_.@-]{3,64}$/.test(username)) throw new ApiError(400, 'Логин: 3–64 латинских символа, цифры, _, ., @ или -.');
-    requirePassword(password);
-    this.busy++;
-    let digest;
-    try { digest = await passwordHash(password); } finally { this.busy--; }
-    if (!this.setupRequired) throw new ApiError(409, 'Первоначальная настройка уже завершена.');
-    this.db.prepare('INSERT INTO users VALUES (?, ?)').run(username, digest);
-    this.audit('admin.setup', username);
-    return this.newSession(username);
-  }
-  async login({ username, password }, ip) {
+  async login({ username, password, setupToken }, ip, { allowDefaultWithoutToken = false } = {}) {
     this.throttle(ip);
     const row = typeof username === 'string' ? this.db.prepare('SELECT * FROM users WHERE username = ?').get(username) : null;
     this.busy++;
     let verified;
     try { verified = await verifyPassword(password, row?.password || this.dummyHash); } finally { this.busy--; }
-    if (!row || !verified) { this.audit('admin.login_failed', ip); throw new ApiError(401, 'Неверный логин или пароль.'); }
+    if (!row || !verified || this.db.prepare('SELECT password FROM users WHERE username = ?').get(row.username)?.password !== row.password) {
+      this.audit('admin.login_failed', ip); throw new ApiError(401, 'Неверный логин или пароль.');
+    }
+    if (this.defaultCredentials && !allowDefaultWithoutToken && !equal(setupToken, this.setupToken)) {
+      this.audit('admin.login_failed', ip);
+      throw new ApiError(403, 'Для входа со стандартным паролем нужен токен первоначальной настройки из журнала сервера.');
+    }
     this.audit('admin.login', row.username);
     return this.newSession(row.username);
   }
@@ -140,7 +148,13 @@ export class Auth {
     try {
       if (!row || !await verifyPassword(currentPassword, row.password)) throw new ApiError(403, 'Текущий пароль неверен.');
       const digest = await passwordHash(password);
-      this.db.prepare('UPDATE users SET password = ? WHERE username = ?').run(digest, user);
+      this.db.exec('BEGIN IMMEDIATE');
+      try {
+        const result = this.db.prepare('UPDATE users SET password = ? WHERE username = ? AND password = ?').run(digest, user, row.password);
+        if (!result.changes) throw new ApiError(409, 'Пароль уже изменён. Войдите в панель заново.');
+        this.setPreference('defaultCredentials', false);
+        this.db.exec('COMMIT');
+      } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     } finally { this.busy--; }
     this.sessions.clear(); this.audit('admin.password_changed', user);
     return this.newSession(user);

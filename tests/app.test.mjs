@@ -7,6 +7,7 @@ import { once } from 'node:events';
 import { createHash, createHmac } from 'node:crypto';
 import { request } from 'node:http';
 import { createApp } from '../src/server.mjs';
+import { DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD } from '../src/auth.mjs';
 
 const setupToken = 'test-setup-token-with-32-characters';
 const password = 'test-password-long-enough';
@@ -41,7 +42,7 @@ function rawRequest(endpoint, method, path, { headers = {}, body = '' } = {}) {
   });
 }
 
-test('complete web and S3 workflow: bootstrap, CSRF, permissions, persistence, safe downloads', async t => {
+test('complete web and S3 workflow: default login, CSRF, permissions, persistence, safe downloads', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'storeges3-app-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dataDir, { recursive: true, force: true }); });
@@ -52,12 +53,14 @@ test('complete web and S3 workflow: bootstrap, CSRF, permissions, persistence, s
   async function api(path, method = 'GET', value, headers = {}) {
     return fetch(`${endpoint}/api${path}`, { method, headers: { ...(cookie ? { cookie } : {}), ...(csrf ? { 'x-csrf-token': csrf } : {}), ...(value === undefined ? {} : { 'content-type': 'application/json' }), ...headers }, ...(value === undefined ? {} : { body: JSON.stringify(value) }) });
   }
-  let response = await api('/session'); assert.equal((await response.json()).setupRequired, true);
+  let response = await api('/session'); assert.deepEqual(await response.json(), { authenticated: false, defaultCredentials: true, setupTokenRequired: false });
   response = await api('/status'); assert.equal(response.status, 401);
-  response = await api('/setup', 'POST', { username: 'admin', password, setupToken: 'incorrect' }); assert.equal(response.status, 403);
-  response = await api('/setup', 'POST', { username: 'admin', password, setupToken }); assert.equal(response.status, 200);
+  response = await api('/login', 'POST', { username: DEFAULT_ADMIN_USERNAME, password: DEFAULT_ADMIN_PASSWORD }); assert.equal(response.status, 200);
   cookie = response.headers.get('set-cookie').split(';')[0]; csrf = (await response.json()).csrf;
   assert.match(response.headers.get('set-cookie'), /HttpOnly; SameSite=Strict/);
+  response = await api('/password', 'PUT', { currentPassword: DEFAULT_ADMIN_PASSWORD, password }); assert.equal(response.status, 200);
+  cookie = response.headers.get('set-cookie').split(';')[0];
+  const changed = await response.json(); csrf = changed.csrf; assert.equal(changed.defaultCredentials, false);
   response = await api('/session'); assert.equal((await response.json()).authenticated, true);
   response = await api('/buckets', 'POST', { name: 'documents' }, { 'x-csrf-token': 'invalid' }); assert.equal(response.status, 403);
   response = await api('/buckets', 'POST', { name: 'documents' }, { origin: 'https://attacker.example' }); assert.equal(response.status, 403);
@@ -94,15 +97,119 @@ test('complete web and S3 workflow: bootstrap, CSRF, permissions, persistence, s
   response = await api('/status'); assert.equal(response.status, 401, 'old session must be revoked after password change');
 });
 
-test('login throttling, secure cookie, and single-use bootstrap', async t => {
+test('login throttling, secure cookie, and initialization never replaces an administrator', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'storeges3-auth-'));
   const app = await createApp({ dataDir, setupToken, publicOrigin: 'https://storage.example.com' });
   t.after(async () => { await app.close(); await rm(dataDir, { recursive: true, force: true }); });
-  const session = await app.auth.setup({ username: 'admin', password, setupToken }, 'test');
+  const session = await app.auth.login({ username: DEFAULT_ADMIN_USERNAME, password: DEFAULT_ADMIN_PASSWORD, setupToken }, 'test');
   assert.match(app.auth.cookie(session.token), /; Secure$/);
-  await assert.rejects(app.auth.setup({ username: 'admin2', password, setupToken }, 'test'), e => e.status === 409);
+  const original = app.auth.db.prepare('SELECT * FROM users').all();
+  await app.auth.initializeDefaults();
+  assert.deepEqual(app.auth.db.prepare('SELECT * FROM users').all(), original);
   for (let i = 0; i < 8; i++) await assert.rejects(app.auth.login({ username: 'nobody', password: 'bad' }, 'attacker'), e => e.status === 401);
   await assert.rejects(app.auth.login({ username: 'admin', password }, 'attacker'), e => e.status === 429);
+});
+
+test('factory credentials persist until changed; custom password and revoked sessions survive restart', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'storeges3-default-password-'));
+  let app;
+  t.after(async () => { if (app) await app.close(); await rm(dataDir, { recursive: true, force: true }); });
+  app = await createApp({ dataDir });
+  const persistedToken = app.auth.setupToken;
+  assert.ok(persistedToken.length >= 24);
+  assert.equal(app.auth.defaultCredentials, true);
+  await assert.rejects(app.auth.login({ username: 'admin', password: 'wrong-password' }, 'test'), e => e.status === 401);
+  const originalHash = app.auth.db.prepare('SELECT password FROM users WHERE username = ?').get('admin').password;
+  assert.notEqual(originalHash, DEFAULT_ADMIN_PASSWORD);
+  await app.close(); app = null;
+
+  app = await createApp({ dataDir });
+  assert.equal(app.auth.setupToken, persistedToken);
+  assert.equal(app.auth.defaultCredentials, true);
+  assert.equal(app.auth.db.prepare('SELECT password FROM users WHERE username = ?').get('admin').password, originalHash);
+  const session = await app.auth.login({ username: 'admin', password: DEFAULT_ADMIN_PASSWORD, setupToken: persistedToken }, 'test');
+  const requestSession = { headers: { cookie: `storeges3_session=${session.token}` } };
+  await assert.rejects(app.auth.changePassword('admin', { currentPassword: DEFAULT_ADMIN_PASSWORD, password: 'too-short' }, 'test'), e => e.status === 400);
+  assert.equal(app.auth.defaultCredentials, true);
+  await app.auth.changePassword('admin', { currentPassword: DEFAULT_ADMIN_PASSWORD, password }, 'test');
+  assert.equal(app.auth.defaultCredentials, false);
+  assert.equal(app.auth.session(requestSession), null, 'changing the password must revoke previous sessions');
+  await app.close(); app = null;
+
+  app = await createApp({ dataDir });
+  assert.equal(app.auth.defaultCredentials, false);
+  await assert.rejects(app.auth.login({ username: 'admin', password: DEFAULT_ADMIN_PASSWORD, setupToken: persistedToken }, 'test'), e => e.status === 401);
+  assert.equal((await app.auth.login({ username: 'admin', password }, 'test')).user, 'admin');
+  assert.equal(app.auth.db.prepare('SELECT count(*) AS count FROM users').get().count, 1);
+});
+
+test('factory login requires server token on wildcard listeners, public origins, and configured proxies', async t => {
+  for (const scenario of [
+    { name: 'wildcard', host: '0.0.0.0', options: {} },
+    { name: 'public origin', host: '127.0.0.1', options: { publicOrigin: 'https://storage.example.com' } },
+    { name: 'trusted proxy', host: '127.0.0.1', options: { trustedProxyIPs: '127.0.0.1' } },
+  ]) await t.test(scenario.name, async t => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'storeges3-default-guard-'));
+    const app = await createApp({ dataDir, setupToken, ...scenario.options });
+    t.after(async () => { await app.close(); await rm(dataDir, { recursive: true, force: true }); });
+    app.server.listen(0, scenario.host); await once(app.server, 'listening');
+    const endpoint = `http://127.0.0.1:${app.server.address().port}`;
+    const state = await rawRequest(endpoint, 'GET', '/api/session');
+    assert.deepEqual(JSON.parse(state.body), { authenticated: false, defaultCredentials: true, setupTokenRequired: true });
+    assert.ok(!state.body.includes(setupToken));
+    const login = (token, headers = {}) => rawRequest(endpoint, 'POST', '/api/login', {
+      headers: { 'content-type': 'application/json', ...headers },
+      body: JSON.stringify({ username: 'admin', password: DEFAULT_ADMIN_PASSWORD, ...(token === undefined ? {} : { setupToken: token }) }),
+    });
+    assert.equal((await login()).status, 403);
+    assert.equal((await login('wrong-token')).status, 403);
+    assert.equal((await login(undefined, { 'x-27g-client-ip': '127.0.0.1', 'x-forwarded-for': '127.0.0.1', host: 'localhost' })).status, 403);
+    assert.equal((await login(undefined, { 'x-27g-client-ip': 'invalid' })).status, 403);
+    const accepted = await login(setupToken);
+    assert.equal(accepted.status, 200);
+    assert.equal(JSON.parse(accepted.body).defaultCredentials, true);
+    assert.ok(!accepted.body.includes(setupToken));
+    const cookie = accepted.headers['set-cookie'][0].split(';')[0];
+    const status = await rawRequest(endpoint, 'GET', '/api/status', { headers: { cookie } });
+    assert.equal(JSON.parse(status.body).security.defaultCredentials, true);
+    const setup = await rawRequest(endpoint, 'POST', '/api/setup', {
+      headers: { 'content-type': 'application/json', cookie, 'x-csrf-token': JSON.parse(accepted.body).csrf },
+      body: JSON.stringify({ username: 'replacement', password, setupToken }),
+    });
+    assert.equal(setup.status, 404, 'obsolete setup route must not create a replacement administrator');
+    const changed = await rawRequest(endpoint, 'PUT', '/api/password', {
+      headers: { 'content-type': 'application/json', cookie, 'x-csrf-token': JSON.parse(accepted.body).csrf },
+      body: JSON.stringify({ currentPassword: DEFAULT_ADMIN_PASSWORD, password }),
+    });
+    assert.equal(changed.status, 200);
+    assert.equal(JSON.parse(changed.body).defaultCredentials, false);
+    const updatedState = await rawRequest(endpoint, 'GET', '/api/session');
+    assert.deepEqual(JSON.parse(updatedState.body), { authenticated: false, defaultCredentials: false, setupTokenRequired: false });
+    const customLogin = await rawRequest(endpoint, 'POST', '/api/login', {
+      headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'admin', password }),
+    });
+    assert.equal(customLogin.status, 200, 'a custom password must allow remote login without the setup token');
+  });
+});
+
+test('existing installations without the factory preference retain username, password, and S3 keys', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'storeges3-existing-admin-'));
+  let app;
+  t.after(async () => { if (app) await app.close(); await rm(dataDir, { recursive: true, force: true }); });
+  app = await createApp({ dataDir, setupToken });
+  await app.auth.changePassword('admin', { currentPassword: DEFAULT_ADMIN_PASSWORD, password }, 'test');
+  // Model the previous schema: an existing custom administrator has no factory flag.
+  app.auth.db.prepare('UPDATE users SET username = ? WHERE username = ?').run('existing-owner', 'admin');
+  app.auth.db.prepare('DELETE FROM preferences WHERE key = ?').run('defaultCredentials');
+  const stored = app.auth.db.prepare('SELECT * FROM users').all();
+  const key = app.auth.createKey({ label: 'existing-application' });
+  await app.close(); app = null;
+  app = await createApp({ dataDir, setupToken });
+  assert.equal(app.auth.defaultCredentials, false);
+  assert.deepEqual(app.auth.db.prepare('SELECT * FROM users').all(), stored);
+  assert.equal((await app.auth.login({ username: 'existing-owner', password }, 'test')).user, 'existing-owner');
+  await assert.rejects(app.auth.login({ username: 'admin', password: DEFAULT_ADMIN_PASSWORD, setupToken }, 'test'), e => e.status === 401);
+  assert.equal(app.auth.lookupKey(key.accessKey).secretKey, key.secretKey);
 });
 
 test('raw S3 dot-segment paths never dispatch to admin, console, or health routes', async t => {
