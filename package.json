@@ -1,6 +1,6 @@
 {
   "name": "27g-storage-s3",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "storageFormatVersion": 1,
   "storageUpgradeMode": "none",
   "private": true,

@@ -1,166 +1,180 @@
+**English · [Русский](README.ru.md)**
+
 <p align="center">
-  <img src="web/brand-mark.png" width="100" height="100" alt="Фирменный знак 27G-StorageS3 — циановый куб">
+  <img src="web/brand-mark.png" width="100" height="100" alt="27G-StorageS3 cyan cube logo">
 </p>
 <h1 align="center">27G-StorageS3</h1>
-<p align="center"><strong>Ваши данные. Ваши серверы. Одна понятная панель.</strong></p>
-<p align="center">Объектное хранилище с S3 API, русским веб-интерфейсом и объединением серверов в кластер.</p>
+<p align="center"><strong>Your data. Your servers. One clear console.</strong></p>
+<p align="center">Object storage with an S3 API, an English and Russian web console, and clustered storage nodes.</p>
 <p align="center">
-  <a href="https://github.com/gadmin2151/27G-StorageS3/releases/latest"><img src="https://img.shields.io/github/v/release/gadmin2151/27G-StorageS3?color=28D7EF&amp;label=release" alt="Последний релиз"></a>
+  <a href="https://github.com/gadmin2151/27G-StorageS3/releases/latest"><img src="https://img.shields.io/github/v/release/gadmin2151/27G-StorageS3?color=28D7EF&amp;label=release" alt="Latest release"></a>
   <a href="https://github.com/gadmin2151/27G-StorageS3/actions/workflows/ci.yml"><img src="https://github.com/gadmin2151/27G-StorageS3/actions/workflows/ci.yml/badge.svg" alt="CI and release"></a>
-  <a href="docs/INSTALLATION.md"><img src="https://img.shields.io/badge/Docker-amd64%20%7C%20arm64-28D7EF" alt="Docker: amd64 и arm64"></a>
+  <a href="docs/INSTALLATION.md"><img src="https://img.shields.io/badge/Docker-amd64%20%7C%20arm64-28D7EF" alt="Docker: amd64 and arm64"></a>
 </p>
 <p align="center">
-  <a href="#быстрая-установка">Установить</a> ·
-  <a href="#почему-27g-storages3">Преимущества</a> ·
-  <a href="#сравнение-с-другими-хранилищами">Сравнение</a> ·
-  <a href="#документация">Документация</a>
+  <a href="#quick-install">Install</a> ·
+  <a href="#why-27g-storages3">Advantages</a> ·
+  <a href="#comparison-with-other-storage-systems">Compare</a> ·
+  <a href="#documentation">Documentation</a>
 </p>
 
 ---
 
-27G-StorageS3 объединяет повседневную работу с файлами и управление собственным хранилищем: загрузите фото, создайте временную ссылку, восстановите предыдущую версию или подключите новый сервер через одну веб-панель. Подходит для домашней лаборатории, разработки и пилотных развёртываний на своей инфраструктуре.
+27G-StorageS3 brings everyday file operations and storage administration into one web console. Upload a photo, create an expiring link, restore an earlier version, or connect another server. Designed for home labs, development and pilot deployments on your own infrastructure.
 
-> **Статус: экспериментальная версия 0.3.1.** S3 API реализован частично. Перед использованием для критичных данных изучите [ограничения](#текущие-ограничения) и [матрицу совместимости](docs/S3-COMPATIBILITY.md).
+> **Status: experimental version 0.3.2.** The S3 API is partially implemented. Read the [limitations](#current-limitations) and [compatibility matrix](docs/S3-COMPATIBILITY.md) before using it for critical data.
 
-## Быстрая установка
+The console starts in **English**. After signing in, open **Settings → Language**, select **Русский**, and save to use Russian. Your choice is stored in your account and follows you when you sign in on another device. Other users keep their own preferences.
 
-**Linux amd64 / arm64 · Docker Engine + Compose 2.20+ · root или sudo**
+## Quick install
 
-Нужны `bash`, `curl`, `python3` и `sha256sum`. На Debian/Ubuntu мастер может предложить установку отсутствующего Docker. Node.js на сервер устанавливать не нужно.
+**Linux amd64 / arm64 · Docker Engine + Compose 2.20+ · root or sudo**
+
+Requires `bash`, `curl`, `python3` and `sha256sum`. On Debian/Ubuntu, the wizard can offer to install Docker if it is missing. You do not need Node.js on the host.
 
 ```sh
 curl -fsSL https://github.com/gadmin2151/27G-StorageS3/releases/latest/download/install.sh | bash
 ```
 
-Мастер спросит каталог, порт, сетевой интерфейс и публичный адрес. При наличии `whiptail` появятся диалоговые окна; иначе — текстовые вопросы. Архив релиза проверяется по SHA-256, готовые образы доступны в GHCR.
+Prefer Russian installation dialogs? Use `install-ru.sh` instead:
 
-**1. Откройте панель:** [http://127.0.0.1:9000/console/](http://127.0.0.1:9000/console/) — адрес при настройках по умолчанию.
+```sh
+curl -fsSL https://github.com/gadmin2151/27G-StorageS3/releases/latest/download/install-ru.sh | bash
+```
 
-**2. Получите начальный токен** на сервере:
+Both installers support the same options and update process. The installer language does not change the default console language or anyone's account preference.
+
+The wizard asks for the directory, port, network interface and optional public address. It uses dialog boxes when `whiptail` is available, or text prompts otherwise. The release archive is verified with SHA-256; prebuilt images are available in GHCR.
+
+**1. Open the console:** [http://127.0.0.1:9000/console/](http://127.0.0.1:9000/console/) with the default configuration.
+
+**2. Read the initial setup token** on the server:
 
 ```sh
 sudo docker compose -f /opt/27g-storage-s3/compose.yaml exec -T app cat /data/setup.token
 ```
 
-**3. Войдите:** логин `admin`, пароль `admin!123` и полученный токен. В настройках задайте свой пароль от 12 символов, создайте бакет и загрузите первый файл. Если выбрали другой каталог установки, замените путь к `compose.yaml` в команде.
+**3. Sign in:** username `admin`, password `admin!123`, and the token above. Set your own password of at least 12 characters in Settings, create a bucket and upload your first file. If you selected a different installation directory, adjust the path to `compose.yaml`.
 
 <details>
-<summary><strong>Устанавливаете на удалённый сервер?</strong></summary>
+<summary><strong>Installing on a remote server?</strong></summary>
 
-По умолчанию порт доступен только на самом сервере. Откройте SSH-туннель со своего компьютера:
+By default, the port is only accessible on the server itself. Create an SSH tunnel from your computer:
 
 ```sh
 ssh -L 9000:127.0.0.1:9000 user@server
 ```
 
-Затем перейдите по локальному адресу панели выше. Для публичного доступа настройте DNS, HTTPS и адрес сервиса по [инструкции](docs/OPERATIONS.md#https).
+Then open the local console address above. For public access, configure DNS, HTTPS and the service address using the [operations guide](docs/OPERATIONS.md#https) (Russian).
 
 </details>
 
-### Обновление той же командой
+### Update with the same command
 
-Повторите команду установки. Мастер обнаружит свою установку и предложит совместимое обновление: **сохраняется тот же Docker volume; объекты и базы не копируются**. Объём хранилища может составлять терабайты — установщик не делает его дубликат.
+Run either installation command again. The wizard detects an installation it created and offers a compatible update: **the same Docker volume is retained; objects and databases are not copied**. Terabytes of stored files do not need to be duplicated during an update.
 
-Контейнер кратковременно останавливается. Релиз с несовместимым контрактом хранения отклоняется до остановки; при неудачном запуске предусмотрен возврат к предыдущему образу. Это обновление одиночных установок, созданных мастером; ручные и HA-развёртывания обслуживаются отдельно. [Параметры и порядок обновления →](docs/INSTALLATION.md)
+The container is briefly stopped. Releases with an incompatible storage contract are rejected before shutdown; a failed startup can revert to the previous image. This process supports single-server installations created by the wizard. Manual and HA deployments are maintained separately. [Options and update procedure →](docs/INSTALLATION.md) (Russian)
 
-## Панель в работе
+## The console in action
 
-Графитовый интерфейс, циановый акцент и действия рядом с объектом: предпросмотр, история, ссылка и скачивание.
+A graphite interface with cyan accents and actions beside each object: preview, history, sharing and downloading.
 
-![Бакеты и объекты: загрузка, права доступа, история и временные ссылки](docs/images/objects-v03.jpg)
+![Buckets and objects: uploads, access policies, history and temporary links](docs/images/objects-v03.jpg)
 
 <details>
-<summary><strong>Открыть скриншот предпросмотра изображения</strong></summary>
+<summary><strong>View the image preview screenshot</strong></summary>
 
-![Предпросмотр изображения внутри веб-панели](docs/images/preview-v03.jpg)
+![Image preview inside the web console](docs/images/preview-v03.jpg)
 
 </details>
 
 <details>
-<summary><strong>Открыть скриншот обзора хранилища</strong></summary>
+<summary><strong>View the storage overview screenshot</strong></summary>
 
-![Обзор: объекты, объём данных, RAM-кэш и состояние узлов](docs/images/overview-v02.jpg)
+![Overview: objects, capacity, RAM cache and node status](docs/images/overview-v02.jpg)
 
 </details>
 
-<sub>Настоящие снимки панели с демонстрационными данными: объекты и предпросмотр — v0.3, обзор — v0.2. Показания тестовой среды не являются результатами нагрузочных испытаний.</sub>
+<sub>Actual console screenshots with demonstration data, in Russian: objects and preview from v0.3, overview from v0.2. Test environment figures are not benchmark results.</sub>
 
-## Почему 27G-StorageS3
+## Why 27G-StorageS3
 
-| Преимущество | Что это даёт на практике |
+| Advantage | What it means in practice |
 |:---|:---|
-| **Веб-панель как основной инструмент** | Бакеты, файлы, S3-ключи, пользователи, кластер и настройки на русском. Встроенная Wiki помогает прямо в интерфейсе. |
-| **Понятная установка и обновление** | Одна команда, диалоговый мастер, готовые Docker-образы. Совместимые обновления используют существующий том без копирования содержимого. |
-| **Файлы удобно отдавать людям** | Предпросмотр изображений и текста, временные ссылки с выбором срока и отзывом. Получателю ссылки не нужна учётная запись. |
-| **Восстановление повседневных ошибок** | Текущая и четыре предыдущие версии файла, корзина и восстановление из панели. Резервное копирование настраивается отдельно. |
-| **Расширение на своих серверах** | Объектные RAID0 / RAID1 / RAID10, подключение агента одной командой, перенос данных и проверка реплик через мастер. |
-| **Ресурсы и доступ под контролем** | Ограниченные очереди, потоковые загрузки, настраиваемый RAM-кэш, MFA, роли, квоты и мониторинг в одной системе. |
+| **Web console first** | Buckets, files, S3 keys, users, cluster and settings in English or Russian. Built-in Wiki keeps guidance close at hand. |
+| **Straightforward installation and updates** | One command, an interactive wizard and prebuilt Docker images. Compatible updates use the existing volume without copying its contents. |
+| **Easy sharing with people** | Image and text previews, expiring links with configurable lifetime and revocation. Recipients do not need an account. |
+| **Recovery from everyday mistakes** | The current file and four earlier versions, a trash bin, and restoration from the console. Backups remain a separate task. |
+| **Grow on your own servers** | Object-level RAID0 / RAID1 / RAID10, a one-command agent setup, data migration and replica checks through a wizard. |
+| **Control resources and access** | Bounded queues, streamed uploads, configurable RAM cache, MFA, roles, quotas and monitoring in one system. |
 
-Для одиночного экземпляра не нужны внешний сервер БД или Redis: каталог хранится в SQLite. Приложение использует стандартные модули Node.js без внешних npm-зависимостей. Docker, сеть и подключение дисков подготавливаются на хостах; режим HA требует отдельного арбитра.
+A single instance needs no external database server or Redis: the catalog uses SQLite. The application uses standard Node.js modules without external npm dependencies. Docker, networking and disks are prepared on the hosts; HA requires a separate arbiter.
 
-## Сравнение с другими хранилищами
+## Comparison with other storage systems
 
-Сильная сторона 27G-StorageS3 — повседневное администрирование собственного S3 через русскую панель. Сравнение ниже показывает, где это удобно; оно не является рейтингом производительности или надёжности.
+27G-StorageS3 focuses on everyday administration of your own S3 service through its integrated console. The comparison explains where this is useful; it is not a performance or reliability ranking.
 
-| Система | Когда удобен подход 27G-StorageS3 |
+| System | When the 27G-StorageS3 approach is useful |
 |:---|:---|
-| **MinIO Community** | Когда хочется управлять пользователями, доступом и хранилищем в одной русской панели. В upstream Community после упрощения Console операции Users / Policy / Config перенесены в `mc`. [Ответ команды MinIO](https://github.com/minio/minio/issues/21407). |
-| **Garage** | Когда панель, предпросмотр файлов и Wiki нужны сразу в составе сервера. Garage документирует настройку через TOML и CLI; [Garage Web UI](https://github.com/khairul169/garage-webui) — отдельный проект. [Руководство Garage](https://garagehq.deuxfleurs.fr/documentation/quick-start/). |
-| **Ceph Object Gateway** | Когда достаточно отдельного S3-сервера с последующим добавлением узлов. Одиночный 27G-StorageS3 использует приложение и SQLite; RGW работает поверх [Ceph Storage Cluster](https://docs.ceph.com/en/squid/radosgw/). У Ceph также есть [свой Dashboard](https://docs.ceph.com/en/squid/mgr/dashboard/). |
-| **Amazon S3** | Когда данные должны находиться на собственных Linux-серверах и дисках, в том числе в локальной сети, без аккаунта AWS. [Amazon S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) — управляемый сервис; [S3 on Outposts](https://docs.aws.amazon.com/AmazonS3/latest/s3-outposts/S3onOutposts.html) использует инфраструктуру AWS. |
+| **MinIO Community** | When you want users, access controls and storage in one bilingual console. After the upstream Community Console was simplified, Users / Policy / Config operations moved to `mc`. [MinIO team response](https://github.com/minio/minio/issues/21407). |
+| **Garage** | When you want the console, file previews and Wiki included with the server. Garage documents TOML and CLI setup; [Garage Web UI](https://github.com/khairul169/garage-webui) is a separate project. [Garage guide](https://garagehq.deuxfleurs.fr/documentation/quick-start/). |
+| **Ceph Object Gateway** | When a standalone S3 server with additional nodes later is sufficient. A single 27G-StorageS3 instance uses the application and SQLite; RGW runs on a [Ceph Storage Cluster](https://docs.ceph.com/en/squid/radosgw/). Ceph also provides its own [Dashboard](https://docs.ceph.com/en/squid/mgr/dashboard/). |
+| **Amazon S3** | When data should live on your Linux servers and disks, including a local network, without an AWS account. [Amazon S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) is a managed service; [S3 on Outposts](https://docs.aws.amazon.com/AmazonS3/latest/s3-outposts/S3onOutposts.html) uses AWS infrastructure. |
 
-<sub>Сведения об аналогах проверены 12 октября 2026 года. Строка MinIO относится к upstream Community, а не к AIStor или сторонним форкам. 27G-StorageS3 пока уступает зрелым системам по полноте API и объёму эксплуатационных испытаний.</sub>
+<sub>Sources checked on October 12, 2026. The MinIO row refers to upstream Community, not AIStor or independent forks. 27G-StorageS3 currently has less API coverage and operational testing than mature systems.</sub>
 
-## Что уже умеет система
+## Available features
 
-| Область | Возможности |
+| Area | Capabilities |
 |:---|:---|
-| **S3 для приложений** | AWS Signature V4, path-style, presigned GET/PUT, multipart с продолжением загрузки, Range GET, checksum и пагинация. Объект до **5 GiB**, включая multipart. |
-| **Файлы в браузере** | Drag-and-drop, прогресс и очередь, PNG/JPEG/GIF/WebP/AVIF и текст в предпросмотре, пять версий, корзина, временные ссылки на **1 час — 7 дней**. |
-| **Политика бакетов** | Закрытый по умолчанию; можно разрешить публичное чтение по полному пути или выбранным префиксам. Анонимный список файлов остаётся закрыт. |
-| **Пользователи** | Admin / operator / viewer, TOTP MFA, квоты пользователей и бакетов. S3-ключи ограничиваются бакетами, префиксами, действиями и сроком. |
-| **Кластер и диски** | Узлы хранения, миграция и проверка/ремонт реплик. Через отдельный агент: каталоги, готовые ext4/XFS/Btrfs, SMB 3 и NFSv4, без форматирования. |
-| **Наблюдение** | Состояние узлов, очередь, память, задержки p50/p95/p99, предупреждения в панели и защищённые метрики Prometheus. Журнал по 10 / 25 / 50 событий. |
-| **Адрес и публикация** | Домен сервиса для новых ссылок, отдельные CORS origins, конфигурация HTTPS. Сборки и релизы в GitHub Actions, контейнеры amd64 / arm64 в GHCR. |
+| **S3 for applications** | AWS Signature V4, path-style, presigned GET/PUT, resumable multipart, Range GET, checksum and pagination. Objects up to **5 GiB**, including multipart. |
+| **Files in the browser** | Drag-and-drop, upload progress and queue, PNG/JPEG/GIF/WebP/AVIF and text previews, five versions, trash, temporary links lasting **1 hour to 7 days**. |
+| **Bucket policy** | Private by default; allow public reads by exact path or selected prefixes. Anonymous object listings remain disabled. |
+| **Users** | Admin / operator / viewer, personal language preference, TOTP MFA, user and bucket quotas. S3 keys can be scoped to buckets, prefixes, actions and expiration. |
+| **Cluster and disks** | Storage nodes, migration, replica verification and repair. A separate agent connects directories, existing ext4/XFS/Btrfs filesystems, SMB 3 and NFSv4 without formatting. |
+| **Monitoring** | Node state, queue, memory, p50/p95/p99 latency, console alerts and protected Prometheus metrics. Audit pages of 10 / 25 / 50 events. |
+| **Addresses and releases** | Service domain for new links, separate CORS origins and an HTTPS configuration. GitHub Actions builds and releases, amd64 / arm64 images in GHCR. |
 
-### Выберите схему хранения
+### Choose a storage layout
 
-| Режим | Узлы | Размещение объектов | Когда выбирать |
+| Mode | Nodes | Object placement | Use case |
 |:---|:---:|:---|:---|
-| **RAID0** | От 1 | Одна копия объекта на одном из узлов | Объединение ёмкости, когда зеркалирование не требуется |
-| **RAID1** | От 2 | Копия каждого объекта на каждом выбранном узле | Зеркалирование данных |
-| **RAID10** | От 4, чётное число | Объекты распределяются между зеркальными парами | Сочетание распределения и дублирования |
+| **RAID0** | 1 or more | One copy of each object on one node | Pooling capacity without mirroring |
+| **RAID1** | 2 or more | Every object copied to every selected node | Mirroring data |
+| **RAID10** | Even number, at least 4 | Objects distributed across mirrored pairs | Combining distribution with duplication |
 
-Это **объектные аналоги RAID**: распределяются целые файлы. RAID0 не защищает от потери узла; подтверждение зеркальной записи требует всех обязательных копий. Независимые серверы и диски нужны для независимости отказов. Отказоустойчивость координатора включается отдельно: [master/slave с арбитром etcd](docs/HA.md).
+These are **object-level RAID equivalents**: entire files are placed on nodes. RAID0 does not protect against node loss; mirrored writes require all mandatory copies to be confirmed. Independent servers and disks are needed for independent failure domains. Coordinator failover is configured separately: [master/slave with an etcd arbiter](docs/HA.md).
 
-Новый сервер подключается из **«Кластер → Подключить сервер»**: создайте команду, выполните её на нужном Linux-сервере с Docker и проверьте появление агента. [Подключение дисков и агентов →](docs/DISKS.md)
+Connect another server through **Cluster → Connect server**: generate a command, run it on a Linux server with Docker, and check that the agent appears. [Disks and agents →](docs/DISKS.md)
 
-## Текущие ограничения
+## Current limitations
 
-- **Часть S3 API.** Пока нет полного IAM, STS, lifecycle, CopyObject, Object Lock, S3 SSE и ряда других операций. Полный список — в [матрице совместимости](docs/S3-COMPATIBILITY.md).
-- **HA развивается.** Master/slave использует отдельный кворум etcd и полные снимки метаданных. В HA физическая очистка старых blobs отключена; они продолжают занимать место. [Ограничения HA](docs/HA.md).
-- **Нет подтверждённого преимущества по скорости.** Сравнительные бенчмарки, независимый аудит и длительные испытания отказов ещё не проведены. Реальные SMB/NFS и физические диски требуют дополнительных испытаний.
-- **Права панели общие для хранилища.** Роли не обеспечивают изоляцию арендаторов по бакетам. Предупреждения пока отображаются в панели, без email/webhook. Данные на диске приложением не шифруются.
+- **Partial S3 API.** Full IAM, STS, lifecycle, CopyObject, Object Lock, S3 SSE and several other operations are not implemented. See the [compatibility matrix](docs/S3-COMPATIBILITY.md).
+- **HA is evolving.** Master/slave uses a separate etcd quorum and full metadata snapshots. Physical cleanup of old blobs is disabled in HA; they continue to occupy space. [HA limitations](docs/HA.md).
+- **No proven speed advantage.** Comparative benchmarks, independent auditing and extended failure testing have not been completed. Real SMB/NFS mounts and physical devices need additional testing.
+- **Console roles apply across storage.** Roles do not isolate tenants by bucket. Alerts are currently shown in the console, without email/webhooks. The application does not encrypt stored object data at rest.
 
-Для публикации в интернете настройте HTTPS, смените начальный пароль и ограничьте доступ к панели. [Защита](docs/OPERATIONS.md#защита) · [Резервное копирование и восстановление](docs/OPERATIONS.md#резервное-копирование-и-восстановление)
+Before exposing the service to the internet, configure HTTPS, change the initial password and restrict console access. [Security](docs/OPERATIONS.md#защита) · [Backup and recovery](docs/OPERATIONS.md#резервное-копирование-и-восстановление)
 
-## Документация
+## Documentation
 
-| Задача | Руководство |
+The console includes an English and Russian Wiki. Detailed repository guides below are currently in Russian; both README editions cover installation and first login.
+
+| Task | Guide |
 |:---|:---|
-| Установить, настроить или обновить | [Установка и обновление](docs/INSTALLATION.md) |
-| Работать с файлами, кластером, доменом и HTTPS | [Эксплуатация](docs/OPERATIONS.md) |
-| Подключить SDK или S3-клиент | [Совместимость S3 и примеры](docs/S3-COMPATIBILITY.md) |
-| Подключить диск, SMB/CIFS, NFS или новый сервер | [Диски и агент](docs/DISKS.md) |
-| Настроить master/slave | [HA и восстановление](docs/HA.md) |
-| Собрать и выпустить версию | [CI/CD](docs/CI-CD.md) |
-| Изучить планы и исследование аналогов | [План развития](docs/FEATURE-ROADMAP.md) |
-| Продолжить разработку на другом устройстве | [Контекст проекта](docs/PROJECT_MEMORY.md) и [правила для агента](AGENTS.md) |
+| Install, configure or update | [Installation and updates](docs/INSTALLATION.md) |
+| Work with files, clusters, domains and HTTPS | [Operations](docs/OPERATIONS.md) |
+| Connect an SDK or S3 client | [S3 compatibility and examples](docs/S3-COMPATIBILITY.md) |
+| Connect a disk, SMB/CIFS, NFS or another server | [Disks and agent](docs/DISKS.md) |
+| Configure master/slave | [HA and recovery](docs/HA.md) |
+| Build and release a version | [CI/CD](docs/CI-CD.md) |
+| Review plans and research on alternatives | [Roadmap](docs/FEATURE-ROADMAP.md) |
+| Continue development on another device | [Project context](docs/PROJECT_MEMORY.md) and [agent instructions](AGENTS.md) |
 
 <details>
-<summary><strong>Разработка и запуск из исходников</strong></summary>
+<summary><strong>Development and running from source</strong></summary>
 
-Для локального запуска нужен Node.js **22.13+**; `npm install` не требуется.
+Local execution requires Node.js **22.13+**; `npm install` is not required.
 
 ```sh
 git clone https://github.com/gadmin2151/27G-StorageS3.git
@@ -168,19 +182,19 @@ cd 27G-StorageS3
 node src/server.mjs
 ```
 
-Для запуска в Docker используйте `docker compose up -d --build`. Панель: `http://127.0.0.1:9000/console/`, начальная пара — `admin` / `admin!123`. При таком запуске токен получите командой `docker compose exec -T app cat /data/setup.token`. Прямой запуск Node на loopback без публичного origin и доверенных proxy допускает первоначальный вход без токена.
+For Docker, use `docker compose up -d --build`. The console is at `http://127.0.0.1:9000/console/`; initial credentials are `admin` / `admin!123`. For this Docker setup, read the token with `docker compose exec -T app cat /data/setup.token`. Direct Node execution on loopback without a public origin or trusted proxies allows initial login without a token.
 
 ```sh
 node --test tests/*.test.mjs
 docker compose config --quiet
 ```
 
-В версии 0.3.1 локально прошли **122/122 теста без пропусков**. Для HA-тестов требуется настоящий etcd: задайте `ETCD_BINARY=/путь/к/etcd`; без него часть проверок пропускается. [Релизный запуск GitHub Actions](https://github.com/gadmin2151/27G-StorageS3/actions/runs/38247581785) проверил контейнеры, установку и обновление с настоящим Docker и выпустил образы для двух архитектур. Функциональные проверки не заменяют нагрузочные испытания и аудит.
+Version 0.3.2 passed **135/135 local tests without skips**. HA tests need real etcd: set `ETCD_BINARY=/path/to/etcd`; without it some checks are skipped. The [0.3.1 release workflow](https://github.com/gadmin2151/27G-StorageS3/actions/runs/38247581785) verified containers, installation and updates using real Docker, and published images for both architectures. Functional checks do not replace load testing and auditing. Subsequent verification is recorded in [project context](docs/PROJECT_MEMORY.md).
 
-Для продолжения работы на другом устройстве откройте репозиторий и начните с `AGENTS.md` и `docs/PROJECT_MEMORY.md`. В Git сохраняются исходники и контекст проекта; данные хранилища и секреты переносятся отдельно.
+To continue on another device, open the repository and start with `AGENTS.md` and `docs/PROJECT_MEMORY.md`. Git carries source code and project context; storage data and secrets are transferred separately.
 
 </details>
 
 ---
 
-<p align="center"><strong>27G-StorageS3</strong><br>Собственное хранилище с управлением через браузер.</p>
+<p align="center"><strong>27G-StorageS3</strong><br>Your own storage, managed in the browser.</p>
