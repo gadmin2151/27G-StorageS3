@@ -6,20 +6,30 @@ on:
     branches: [master]
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: 'Publish the package.json version as a stable release (master only)'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: storage-ci-${{ github.workflow }}-${{ github.ref }}
+  group: storage-ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.publish_release && 'release' || 'check' }}
   # Never interrupt a version release while it is publishing its artifacts.
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') && !(github.event_name == 'workflow_dispatch' && inputs.publish_release) }}
 
 jobs:
   validate:
     name: Tests, HA and configuration
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    outputs:
+      release-tag: ${{ steps.release-meta.outputs.release-tag }}
+      stable-release: ${{ steps.release-meta.outputs.stable-release }}
+      version: ${{ steps.release-meta.outputs.version }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -27,15 +37,30 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
-      - name: Validate release tag and package version
+      - name: Validate release request and package version
+        id: release-meta
         env:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
+          REF: ${{ github.ref }}
+          EVENT: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          REQUEST_RELEASE: ${{ inputs.publish_release }}
         run: |
-          if [[ "$REF_TYPE" == tag ]]; then
-            [[ "$REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo 'Use a stable vX.Y.Z tag.' >&2; exit 1; }
-            [[ "$REF_NAME" == "v$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')" ]] || { echo 'Tag does not match package.json.' >&2; exit 1; }
+          version=$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')
+          [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo 'package.json must contain a stable X.Y.Z version.' >&2; exit 1; }
+          stable=false
+          tag=''
+          if [[ "$EVENT" == workflow_dispatch && "$REQUEST_RELEASE" == true ]]; then
+            [[ "$REF" == refs/heads/master && "$REPOSITORY" == gadmin2151/27G-StorageS3 ]] || { echo 'Manual releases are allowed only from master in the source repository.' >&2; exit 1; }
+            stable=true
+            tag="v$version"
+          elif [[ "$REF_TYPE" == tag ]]; then
+            [[ "$REF_NAME" == "v$version" ]] || { echo 'Tag must be vX.Y.Z and match package.json.' >&2; exit 1; }
+            stable=true
+            tag="$REF_NAME"
           fi
+          printf 'release-tag=%s\nstable-release=%s\nversion=%s\n' "$tag" "$stable" "$version" >> "$GITHUB_OUTPUT"
       - name: Download checksum-pinned etcd for real HA tests
         run: |
           mkdir -p "$RUNNER_TEMP/etcd"
@@ -133,8 +158,9 @@ jobs:
     name: Publish verified images and version release
     needs: [validate, containers]
     if: >-
-      github.event_name == 'push' && github.repository == 'gadmin2151/27G-StorageS3' &&
-      (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
+      github.repository == 'gadmin2151/27G-StorageS3' &&
+      ((github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))) ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_release && github.ref == 'refs/heads/master'))
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     permissions:
@@ -154,15 +180,31 @@ jobs:
         with:
           node-version: '22'
       - name: Refuse overwriting a published version
-        if: startsWith(github.ref, 'refs/tags/')
+        if: needs.validate.outputs.stable-release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release-tag }}
+          RELEASE_EVENT: ${{ github.event_name }}
         run: |
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo 'This release already exists. Publish a new version instead of replacing its files.' >&2
-            exit 1
-          fi
+          python3 - <<'PYTHON'
+          import os, urllib.error, urllib.request
+          base = 'https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY']
+          def exists(path):
+              request = urllib.request.Request(base + path, headers={
+                  'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                  'Accept': 'application/vnd.github+json',
+              })
+              try:
+                  with urllib.request.urlopen(request, timeout=30): return True
+              except urllib.error.HTTPError as error:
+                  if error.code == 404: return False
+                  raise SystemExit('Release preflight failed with HTTP ' + str(error.code))
+          tag = os.environ['RELEASE_TAG']
+          if exists('/releases/tags/' + tag):
+              raise SystemExit('This release already exists. Publish a new version instead of replacing its files.')
+          if os.environ['RELEASE_EVENT'] == 'workflow_dispatch' and exists('/git/ref/tags/' + tag):
+              raise SystemExit('This tag already exists. Manual release requires a new version and creates its tag after checks.')
+          PYTHON
       - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
         with:
           platforms: arm64
@@ -208,12 +250,12 @@ jobs:
           cache-to: type=gha,mode=max,scope=disk-agent
       - name: Promote verified image digests
         env:
-          REF_TYPE: ${{ github.ref_type }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          STABLE_RELEASE: ${{ needs.validate.outputs.stable-release }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release-tag }}
           APP_DIGEST: ${{ steps.app.outputs.digest }}
           AGENT_DIGEST: ${{ steps.agent.outputs.digest }}
         run: |
-          if [[ "$REF_TYPE" == tag ]]; then
+          if [[ "$STABLE_RELEASE" == true ]]; then
             version=${RELEASE_TAG#v}
             docker buildx imagetools create --tag "$APP_IMAGE:$version" --tag "$APP_IMAGE:latest" "$APP_IMAGE@$APP_DIGEST"
             docker buildx imagetools create --tag "$AGENT_IMAGE:$version" --tag "$AGENT_IMAGE:latest" "$AGENT_IMAGE@$AGENT_DIGEST"
@@ -224,8 +266,8 @@ jobs:
 
   release:
     name: Publish GitHub Release assets
-    needs: [publish]
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [validate, publish]
+    if: needs.validate.outputs.stable-release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -243,7 +285,8 @@ jobs:
       - name: Create GitHub Release with installer and verified source bundle
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_EVENT: ${{ github.event_name }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release-tag }}
           APP_DIGEST: ${{ needs.publish.outputs.app-digest }}
           AGENT_DIGEST: ${{ needs.publish.outputs.agent-digest }}
         run: |
@@ -262,5 +305,10 @@ jobs:
 
           Экспериментальная версия; требования установки и ограничения описаны в README и docs/INSTALLATION.md. Автоматическое обновление работающих серверов не выполняется.
           NOTES
-          gh release create "$RELEASE_TAG" --verify-tag --title "27G-StorageS3 $RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md" --latest \
+          tag_args=(--verify-tag)
+          if [[ "$RELEASE_EVENT" == workflow_dispatch ]]; then
+            # The token-created tag will not trigger a second workflow run.
+            tag_args=(--target "$GITHUB_SHA")
+          fi
+          gh release create "$RELEASE_TAG" "${tag_args[@]}" --title "27G-StorageS3 $RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md" --latest \
             "$RUNNER_TEMP/release/install.sh" "$RUNNER_TEMP/release/27g-storage-s3-$RELEASE_TAG.tar.gz" "$RUNNER_TEMP/release/SHA256SUMS"
