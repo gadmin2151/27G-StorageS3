@@ -88,6 +88,7 @@ jobs:
           grep -q '^# skipped 0$' "$RUNNER_TEMP/tests.tap"
       - name: Shell and JavaScript syntax
         run: |
+          node scripts/generate-installers.mjs --check
           for script in scripts/*.sh; do bash -n "$script"; done
           for script in src/*.mjs web/*.js; do node --check "$script"; done
           git diff --check
@@ -112,6 +113,11 @@ jobs:
           tar -xzf "$RUNNER_TEMP/release-one/27g-storage-s3-$version.tar.gz" -C "$RUNNER_TEMP/release-check"
           test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/src/server.mjs"
           test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/scripts/install-agent.sh"
+          test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/scripts/install-ru.sh"
+          test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/README.md"
+          test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/README.ru.md"
+          test -s "$RUNNER_TEMP/release-one/install.sh"
+          test -s "$RUNNER_TEMP/release-one/install-ru.sh"
           test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/web/brand-mark.png"
           test ! -e "$RUNNER_TEMP/release-check/27g-storage-s3-$version/.git"
           test ! -e "$RUNNER_TEMP/release-check/27g-storage-s3-$version/data"
@@ -294,7 +300,8 @@ jobs:
           cat > "$RUNNER_TEMP/release-notes.md" <<NOTES
           27G-StorageS3 $RELEASE_TAG
 
-          Установка и обновление: install.sh. Проверенные исходники: 27g-storage-s3-$RELEASE_TAG.tar.gz. SHA-256 обоих файлов: SHA256SUMS.
+          Install or update: install.sh (English), install-ru.sh (Русский).
+          Verified source / проверенные исходники: 27g-storage-s3-$RELEASE_TAG.tar.gz. SHA-256 всех трёх файлов: SHA256SUMS.
 
           Docker: $APP_IMAGE:${RELEASE_TAG#v} (linux/amd64, linux/arm64).
           Digest: $APP_DIGEST
@@ -311,4 +318,4 @@ jobs:
             tag_args=(--target "$GITHUB_SHA")
           fi
           gh release create "$RELEASE_TAG" "${tag_args[@]}" --title "27G-StorageS3 $RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md" --latest \
-            "$RUNNER_TEMP/release/install.sh" "$RUNNER_TEMP/release/27g-storage-s3-$RELEASE_TAG.tar.gz" "$RUNNER_TEMP/release/SHA256SUMS"
+            "$RUNNER_TEMP/release/install.sh" "$RUNNER_TEMP/release/install-ru.sh" "$RUNNER_TEMP/release/27g-storage-s3-$RELEASE_TAG.tar.gz" "$RUNNER_TEMP/release/SHA256SUMS"
