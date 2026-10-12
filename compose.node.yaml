@@ -1,0 +1,30 @@
+# Run this file on each storage server after scripts/init-cluster.sh.
+# Set NODE_BIND_IP to a private/VPN address. Do not expose 9100 to the Internet.
+name: 27g-storeges3-node
+services:
+  node:
+    image: 27g-storeges3:local
+    build: .
+    command: [node, src/node.mjs]
+    init: true
+    restart: unless-stopped
+    user: node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:size=64m,mode=1777]
+    pids_limit: 128
+    mem_limit: 768m
+    environment:
+      HOST: 0.0.0.0
+      NODE_PORT: 9100
+      DATA_DIR: /data
+      NODE_TOKEN_FILE: /run/secrets/node_token
+    ports: ["${NODE_BIND_IP:-127.0.0.1}:9100:9100"]
+    volumes: [objects:/data]
+    secrets: [node_token]
+volumes:
+  objects:
+secrets:
+  node_token:
+    file: ./secrets/node_token

@@ -1,0 +1,13 @@
+{
+  "name": "27g-storeges3",
+  "version": "0.1.0",
+  "private": true,
+  "description": "27g-StoregeS3 — object storage with a web console and replicated storage nodes",
+  "type": "module",
+  "engines": { "node": ">=22.13.0" },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "node": "node src/node.mjs",
+    "test": "node --test tests/*.test.mjs"
+  }
+}

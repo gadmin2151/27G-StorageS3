@@ -1,0 +1,36 @@
+# Set PUBLIC_ORIGIN=https://s3.example.com and DOMAIN=s3.example.com in .env.
+# DNS must point to this host; expose only 80/443, never the storage-node port.
+services:
+  app:
+    environment:
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN=https://your-domain in .env}
+      TRUSTED_PROXY_IPS: 172.29.27.2
+    networks:
+      storage:
+      proxy:
+        ipv4_address: 172.29.27.3
+  gateway:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      proxy:
+        ipv4_address: 172.29.27.2
+    depends_on: [app]
+    security_opt: [no-new-privileges:true]
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  proxy:
+    ipam:
+      config:
+        - subnet: 172.29.27.0/29

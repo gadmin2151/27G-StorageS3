@@ -1,0 +1,72 @@
+name: 27g-storeges3
+
+x-runtime: &runtime
+  image: 27g-storeges3:local
+  build: .
+  init: true
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: [/tmp:size=64m,mode=1777]
+  pids_limit: 128
+  mem_limit: 768m
+  stop_grace_period: 35s
+  networks: [storage]
+
+x-node: &node
+  <<: *runtime
+  profiles: [cluster]
+  command: [node, src/node.mjs]
+  environment:
+    HOST: 0.0.0.0
+    NODE_PORT: 9100
+    DATA_DIR: /data
+    NODE_TOKEN_FILE: /run/secrets/node_token
+  secrets: [node_token]
+
+services:
+  app:
+    <<: *runtime
+    ports: ["127.0.0.1:9000:9000"]
+    environment:
+      HOST: 0.0.0.0
+      DATA_DIR: /data
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
+      CACHE_BYTES: ${CACHE_BYTES:-67108864}
+      UPLOAD_CONCURRENCY: ${UPLOAD_CONCURRENCY:-4}
+      QUEUE_LIMIT: ${QUEUE_LIMIT:-32}
+      MAX_OBJECT_BYTES: ${MAX_OBJECT_BYTES:-5368709120}
+    volumes: [coordinator:/data]
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:9000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+  node1:
+    <<: *node
+    volumes: [node1:/data]
+  node2:
+    <<: *node
+    volumes: [node2:/data]
+  node3:
+    <<: *node
+    volumes: [node3:/data]
+  node4:
+    <<: *node
+    volumes: [node4:/data]
+
+networks:
+  storage:
+
+volumes:
+  coordinator:
+  node1:
+  node2:
+  node3:
+  node4:
+
+secrets:
+  node_token:
+    file: ./secrets/node_token
