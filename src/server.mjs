@@ -19,7 +19,7 @@ import { BucketPolicies } from './bucket-policy.mjs';
 import { AgentEnrollment } from './agent-enrollment.mjs';
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../web');
-const VERSION = '0.3.0';
+const VERSION = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
 const mutations = new Set(['POST', 'PUT', 'DELETE', 'PATCH']);
 const staticFiles = new Map([
   ['/console', ['index.html', 'text/html; charset=utf-8']],

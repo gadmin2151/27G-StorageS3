@@ -1,0 +1,257 @@
+name: CI and release
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: storage-ci-${{ github.workflow }}-${{ github.ref }}
+  # Never interrupt a version release while it is publishing its artifacts.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  validate:
+    name: Tests, HA and configuration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Validate release tag and package version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "$REF_TYPE" == tag ]]; then
+            [[ "$REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo 'Use a stable vX.Y.Z tag.' >&2; exit 1; }
+            [[ "$REF_NAME" == "v$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')" ]] || { echo 'Tag does not match package.json.' >&2; exit 1; }
+          fi
+      - name: Download checksum-pinned etcd for real HA tests
+        run: |
+          mkdir -p "$RUNNER_TEMP/etcd"
+          curl --fail --silent --show-error --location --retry 3 --proto '=https' --tlsv1.2 \
+            https://github.com/etcd-io/etcd/releases/download/v3.6.5/etcd-v3.6.5-linux-amd64.tar.gz \
+            --output "$RUNNER_TEMP/etcd/archive.tar.gz"
+          echo '66bad39ed920f6fc15fd74adcb8bfd38ba9a6412f8c7852d09eb11670e88cac3  archive.tar.gz' | (cd "$RUNNER_TEMP/etcd" && sha256sum --check --strict)
+          tar -xzf "$RUNNER_TEMP/etcd/archive.tar.gz" -C "$RUNNER_TEMP/etcd" --strip-components=1 etcd-v3.6.5-linux-amd64/etcd
+          test -x "$RUNNER_TEMP/etcd/etcd"
+          "$RUNNER_TEMP/etcd/etcd" --version
+          echo "ETCD_BINARY=$RUNNER_TEMP/etcd/etcd" >> "$GITHUB_ENV"
+      - name: Functional tests including three real etcd voters
+        run: |
+          test -x "$ETCD_BINARY"
+          node --test --test-reporter=tap tests/*.test.mjs | tee "$RUNNER_TEMP/tests.tap"
+          grep -q '^# skipped 0$' "$RUNNER_TEMP/tests.tap"
+      - name: Shell and JavaScript syntax
+        run: |
+          for script in scripts/*.sh; do bash -n "$script"; done
+          for script in src/*.mjs web/*.js; do node --check "$script"; done
+          git diff --check
+      - name: Compose configurations
+        env:
+          DOMAIN: s3.example.com
+          PUBLIC_ORIGIN: https://s3.example.com
+        run: |
+          docker compose config --quiet
+          docker compose --profile cluster config --quiet
+          docker compose -f compose.node.yaml config --quiet
+          docker compose -f compose.ha.yaml config --quiet
+          docker compose -f compose.yaml -f compose.https.yaml config --quiet
+          docker compose -f compose.yaml -f compose.disks.yaml config --quiet
+      - name: Reproducible allowlisted release archive
+        run: |
+          version="v$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')"
+          bash scripts/build-release.sh "$version" "$RUNNER_TEMP/release-one"
+          bash scripts/build-release.sh "$version" "$RUNNER_TEMP/release-two"
+          cmp "$RUNNER_TEMP/release-one/SHA256SUMS" "$RUNNER_TEMP/release-two/SHA256SUMS"
+          mkdir "$RUNNER_TEMP/release-check"
+          tar -xzf "$RUNNER_TEMP/release-one/27g-storage-s3-$version.tar.gz" -C "$RUNNER_TEMP/release-check"
+          test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/src/server.mjs"
+          test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/scripts/install-agent.sh"
+          test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/web/brand-mark.png"
+          test ! -e "$RUNNER_TEMP/release-check/27g-storage-s3-$version/.git"
+          test ! -e "$RUNNER_TEMP/release-check/27g-storage-s3-$version/data"
+          test ! -e "$RUNNER_TEMP/release-check/27g-storage-s3-$version/secrets"
+          test ! -e "$RUNNER_TEMP/release-check/27g-storage-s3-$version/.env"
+
+  containers:
+    name: Build and run Docker images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Build coordinator
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          load: true
+          push: false
+          tags: 27g-storage-s3:ci
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,mode=max,scope=app
+      - name: Build disk agent
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: Dockerfile.disk-agent
+          load: true
+          push: false
+          tags: 27g-storage-s3-disk-agent:ci
+          cache-from: type=gha,scope=disk-agent
+          cache-to: type=gha,mode=max,scope=disk-agent
+      - name: Actual container auth, writes and persistence after restart
+        run: bash scripts/container-smoke.sh 27g-storage-s3:ci 27g-storage-s3-disk-agent:ci
+      - name: Installer and in-place update on the same data volume
+        run: sudo env "PATH=$PATH" bash scripts/installer-smoke.sh
+
+  publish:
+    name: Publish verified images and version release
+    needs: [validate, containers]
+    if: >-
+      github.event_name == 'push' && github.repository == 'gadmin2151/27G-StorageS3' &&
+      (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      app-digest: ${{ steps.app.outputs.digest }}
+      agent-digest: ${{ steps.agent.outputs.digest }}
+    env:
+      APP_IMAGE: ghcr.io/gadmin2151/27g-storage-s3
+      AGENT_IMAGE: ghcr.io/gadmin2151/27g-storage-s3-disk-agent
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Refuse overwriting a published version
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo 'This release already exists. Publish a new version instead of replacing its files.' >&2
+            exit 1
+          fi
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Commit tags are staging references. Only promote edge/version/latest after BOTH builds succeed.
+      - name: Publish coordinator commit image
+        id: app
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.APP_IMAGE }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.title=27G-StorageS3
+            org.opencontainers.image.source=https://github.com/gadmin2151/27G-StorageS3
+            org.opencontainers.image.revision=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,mode=max,scope=app
+      - name: Publish disk agent commit image
+        id: agent
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: Dockerfile.disk-agent
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.AGENT_IMAGE }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.title=27G-StorageS3 disk agent
+            org.opencontainers.image.source=https://github.com/gadmin2151/27G-StorageS3
+            org.opencontainers.image.revision=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=disk-agent
+          cache-to: type=gha,mode=max,scope=disk-agent
+      - name: Promote verified image digests
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          APP_DIGEST: ${{ steps.app.outputs.digest }}
+          AGENT_DIGEST: ${{ steps.agent.outputs.digest }}
+        run: |
+          if [[ "$REF_TYPE" == tag ]]; then
+            version=${RELEASE_TAG#v}
+            docker buildx imagetools create --tag "$APP_IMAGE:$version" --tag "$APP_IMAGE:latest" "$APP_IMAGE@$APP_DIGEST"
+            docker buildx imagetools create --tag "$AGENT_IMAGE:$version" --tag "$AGENT_IMAGE:latest" "$AGENT_IMAGE@$AGENT_DIGEST"
+          else
+            docker buildx imagetools create --tag "$APP_IMAGE:edge" "$APP_IMAGE@$APP_DIGEST"
+            docker buildx imagetools create --tag "$AGENT_IMAGE:edge" "$AGENT_IMAGE@$AGENT_DIGEST"
+          fi
+
+  release:
+    name: Publish GitHub Release assets
+    needs: [publish]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      APP_IMAGE: ghcr.io/gadmin2151/27g-storage-s3
+      AGENT_IMAGE: ghcr.io/gadmin2151/27g-storage-s3-disk-agent
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Create GitHub Release with installer and verified source bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          APP_DIGEST: ${{ needs.publish.outputs.app-digest }}
+          AGENT_DIGEST: ${{ needs.publish.outputs.agent-digest }}
+        run: |
+          bash scripts/build-release.sh "$RELEASE_TAG" "$RUNNER_TEMP/release"
+          cat > "$RUNNER_TEMP/release-notes.md" <<NOTES
+          27G-StorageS3 $RELEASE_TAG
+
+          Установка и обновление: install.sh. Проверенные исходники: 27g-storage-s3-$RELEASE_TAG.tar.gz. SHA-256 обоих файлов: SHA256SUMS.
+
+          Docker: $APP_IMAGE:${RELEASE_TAG#v} (linux/amd64, linux/arm64).
+          Digest: $APP_DIGEST
+          Дисковый агент: $AGENT_IMAGE:${RELEASE_TAG#v}.
+          Digest: $AGENT_DIGEST
+
+          CI проверяет функциональные сценарии, HA с тремя настоящими etcd voters и запуск контейнеров amd64 с сохранением данных после перезапуска. Для arm64 проверена сборка; отдельные испытания на физическом ARM-сервере ещё не выполнялись. Монтаж SMB/NFS и блочных устройств этим CI не проверяется.
+
+          Экспериментальная версия; требования установки и ограничения описаны в README и docs/INSTALLATION.md. Автоматическое обновление работающих серверов не выполняется.
+          NOTES
+          gh release create "$RELEASE_TAG" --verify-tag --title "27G-StorageS3 $RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md" --latest \
+            "$RUNNER_TEMP/release/install.sh" "$RUNNER_TEMP/release/27g-storage-s3-$RELEASE_TAG.tar.gz" "$RUNNER_TEMP/release/SHA256SUMS"

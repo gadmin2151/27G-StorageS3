@@ -6,6 +6,7 @@ COPY --chown=node:node src ./src
 COPY --chown=node:node web ./web
 COPY --chown=node:node Dockerfile.disk-agent ./
 COPY --chown=node:node scripts/install-agent.sh ./scripts/install-agent.sh
+COPY --chown=node:node scripts/check-storage.mjs ./scripts/check-storage.mjs
 USER node
 ENV HOST=0.0.0.0 DATA_DIR=/data PORT=9000
 EXPOSE 9000

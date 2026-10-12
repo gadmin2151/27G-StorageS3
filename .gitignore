@@ -13,4 +13,5 @@ node_modules/
 *.token
 *.log
 coverage/
+/dist/
 .DS_Store

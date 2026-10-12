@@ -1,6 +1,8 @@
 {
   "name": "27g-storage-s3",
-  "version": "0.3.0",
+  "version": "0.3.1",
+  "storageFormatVersion": 1,
+  "storageUpgradeMode": "none",
   "private": true,
   "description": "27G-StorageS3 — object storage with a web console and replicated storage nodes",
   "type": "module",
