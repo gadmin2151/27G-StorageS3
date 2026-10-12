@@ -404,5 +404,20 @@ export class Auth {
   }
   preference(key, fallback) { const row = this.db.prepare('SELECT value FROM preferences WHERE key=?').get(key); return row ? JSON.parse(row.value) : fallback; }
   setPreference(key, value) { this.db.prepare('INSERT INTO preferences VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, JSON.stringify(value)); }
+  userPreferences(username) {
+    const languages = this.preference('userLanguages', {});
+    return { language: languages && Object.hasOwn(languages, username) && languages[username] === 'ru' ? 'ru' : 'en' };
+  }
+  setUserPreferences(username, input) {
+    if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 1 || !Object.hasOwn(input, 'language') || !['en', 'ru'].includes(input.language))
+      throw new ApiError(400, 'Language must be en or ru.');
+    if (!this.userPolicy(username)?.enabled) throw new ApiError(403, 'Account is unavailable.');
+    // One existing preferences row keeps snapshots and the on-disk schema
+    // compatible with older releases. Only the authenticated user's key changes.
+    const languages = { ...this.preference('userLanguages', {}), [username]: input.language };
+    this.setPreference('userLanguages', languages);
+    this.audit('user.language_changed', `${username}: ${input.language}`);
+    return this.userPreferences(username);
+  }
   close() { this.sessions.clear(); this.pendingMfa.clear(); this.db.close(); }
 }

@@ -26,6 +26,7 @@ const staticFiles = new Map([
   ['/console/', ['index.html', 'text/html; charset=utf-8']],
   ['/console/app.js', ['app.js', 'text/javascript; charset=utf-8']],
   ['/console/features.js', ['features.js', 'text/javascript; charset=utf-8']],
+  ...['i18n.js', 'i18n-app.js', 'i18n-features.js', 'i18n-server.js'].map(file => [`/console/${file}`, [file, 'text/javascript; charset=utf-8']]),
   ['/console/style.css', ['style.css', 'text/css; charset=utf-8']],
   ['/console/storage-mark.svg', ['storage-mark.svg', 'image/svg+xml']],
   ['/console/brand-mark.png', ['brand-mark.png', 'image/png']],
@@ -207,17 +208,21 @@ export async function createApp(options = {}) {
       if (path === '/api/session' && method === 'GET') {
         const session = auth.session(req);
         return json(res, 200, { authenticated: !!session, defaultCredentials: auth.defaultCredentials,
-          setupTokenRequired: auth.defaultCredentials && !localDefaultLogin(req), ...(session ? { csrf: session.csrf, user: session.user, role: session.role } : {}) });
+          setupTokenRequired: auth.defaultCredentials && !localDefaultLogin(req), language: session ? auth.userPreferences(session.user).language : 'en', ...(session ? { csrf: session.csrf, user: session.user, role: session.role } : {}) });
       }
       if (path === '/api/login' && method === 'POST') {
         const session = await auth.login(await bodyJSON(req), clientIP(req), { allowDefaultWithoutToken: localDefaultLogin(req) });
         res.setHeader('Set-Cookie', auth.cookie(session.token));
-        return json(res, 200, { user: session.user, csrf: session.csrf, role: session.role, defaultCredentials: auth.defaultCredentials });
+        return json(res, 200, { user: session.user, csrf: session.csrf, role: session.role, language: auth.userPreferences(session.user).language, defaultCredentials: auth.defaultCredentials });
       }
       const session = auth.requireSession(req, mutation);
-      const personal = ['/api/logout', '/api/password', '/api/mfa/enroll', '/api/mfa/confirm', '/api/mfa/disable'];
+      const personal = ['/api/logout', '/api/password', '/api/preferences', '/api/mfa/enroll', '/api/mfa/confirm', '/api/mfa/disable'];
       if (mutation && session.role === 'viewer' && !personal.includes(path)) throw new ApiError(403, 'Роль наблюдателя разрешает только чтение.');
       if (mutation && session.role !== 'admin' && ['/api/settings', '/api/topology', '/api/scrub'].includes(path)) throw new ApiError(403, 'Это действие доступно только администратору.');
+      if (path === '/api/preferences') {
+        if (method === 'GET') return json(res, 200, auth.userPreferences(session.user));
+        if (method === 'PUT') return json(res, 200, auth.setUserPreferences(session.user, await bodyJSON(req)));
+      }
       if (path === '/api/preview' && method === 'GET') return await objectPreview(req, res, url, { storage, json });
       if (path === '/api/bucket-access') {
         if (session.role !== 'admin') throw new ApiError(403, 'Политика доступа доступна только администратору.');
@@ -238,7 +243,7 @@ export async function createApp(options = {}) {
       if (path === '/api/password' && method === 'PUT') {
         const updated = await auth.changePassword(session.user, await bodyJSON(req), clientIP(req));
         res.setHeader('Set-Cookie', auth.cookie(updated.token));
-        return json(res, 200, { user: updated.user, csrf: updated.csrf, role: updated.role, defaultCredentials: auth.defaultCredentials });
+        return json(res, 200, { user: updated.user, csrf: updated.csrf, role: updated.role, language: auth.userPreferences(updated.user).language, defaultCredentials: auth.defaultCredentials });
       }
       if (path === '/api/status' && method === 'GET') {
         return json(res, 200, { ...await storage.status(), uptime: Math.floor((Date.now() - started) / 1000), version: VERSION,
