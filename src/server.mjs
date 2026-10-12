@@ -17,6 +17,7 @@ const staticFiles = new Map([
   ['/console/', ['index.html', 'text/html; charset=utf-8']],
   ['/console/app.js', ['app.js', 'text/javascript; charset=utf-8']],
   ['/console/style.css', ['style.css', 'text/css; charset=utf-8']],
+  ['/console/storage-mark.svg', ['storage-mark.svg', 'image/svg+xml']],
 ]);
 const json = (res, status, value) => {
   const body = JSON.stringify(value);
