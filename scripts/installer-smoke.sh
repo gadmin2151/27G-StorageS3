@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # CI-only fixture transport. Docker, Compose, installed app and update logic are real.
+# Install in English, update in Russian: language changes must preserve the same data volume.
 # Run as root on a disposable runner; the published installer has no test bypasses.
 set -euo pipefail
 [[ $EUID == 0 ]] || { echo 'Run installer-smoke.sh as root on a disposable CI runner.' >&2; exit 1; }
@@ -109,7 +110,7 @@ JS
 }
 app_check first "$current"
 before_volume=$(docker volume inspect --format '{{.CreatedAt}}' "$volume")
-bash "$root/scripts/install.sh" --yes --update --build --version "$next" --directory "$installation"
+bash "$root/scripts/install-ru.sh" --yes --update --build --version "$next" --directory "$installation"
 assert_manifest "$next"
 [[ $(docker volume inspect --format '{{.CreatedAt}}' "$volume") == "$before_volume" ]]
 app_check updated "$next"
