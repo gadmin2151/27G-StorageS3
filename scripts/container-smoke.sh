@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Destructive cleanup is restricted to the fresh containers/volumes created here.
 set -euo pipefail
+# Match install-agent.sh: its secret is root-owned 0600. A root container with
+# cap_drop ALL cannot read a runner-owned 0600 bind mount (no DAC_OVERRIDE).
+[[ $EUID == 0 ]] || { echo 'Run container-smoke.sh as root on a disposable CI runner.' >&2; exit 1; }
 app_image=${1:-27g-storage-s3:ci}
 agent_image=${2:-27g-storage-s3-disk-agent:ci}
 work=$(mktemp -d)
