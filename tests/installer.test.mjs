@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 const exec = promisify(execFile);
 const script = resolve('scripts/install.sh');
+const ruScript = resolve('scripts/install-ru.sh');
 const fakeDocker = `#!/usr/bin/env python3
 import sys,os,json,pathlib,re
 args=sys.argv[1:]
@@ -72,7 +73,7 @@ async function fixture(t, version = 'v0.3.1', mode = '') {
     await exec('python3', ['-c', `import io,json,tarfile,hashlib,pathlib,sys
 root=pathlib.Path(sys.argv[1]);version=sys.argv[2];mode=sys.argv[3];prefix='27g-storage-s3-'+version
 name=prefix+'.tar.gz';archive=root/name
-files={'package.json':json.dumps({'version':version[1:],'storageFormatVersion':2 if mode=='incompatible' else 1,'storageUpgradeMode':'none'}),'Dockerfile':'FROM scratch','Dockerfile.disk-agent':'FROM scratch','src/server.mjs':'// fixture','web/index.html':'fixture','scripts/install-agent.sh':'#!/bin/sh','scripts/check-storage.mjs':'// readonly fixture'}
+files={'package.json':json.dumps({'version':version[1:],'storageFormatVersion':2 if mode=='incompatible' else 1,'storageUpgradeMode':'none'}),'Dockerfile':'FROM scratch','Dockerfile.disk-agent':'FROM scratch','src/server.mjs':'// fixture','web/index.html':'fixture','scripts/install-agent.sh':'#!/bin/sh','scripts/check-storage.mjs':'// readonly fixture','README.md':'English documentation','README.ru.md':'Русская документация'}
 if mode=='traversal':files['../outside']='danger'
 with tarfile.open(archive,'w:gz') as tar:
  for path,body in files.items():
@@ -86,8 +87,9 @@ digest='0'*64 if mode=='checksum' else hashlib.sha256(archive.read_bytes()).hexd
 `, dir, next, variant]);
   }
   await release();
-  async function run(args = [], extra = {}) {
-    try { const result = await exec('bash', [script, '--yes', '--version', env.RELEASE_VERSION, '--directory', install, ...args], {env: {...env, ...extra}}); return {...result, code: 0}; }
+  async function run(args = [], extra = {}, edition = 'en') {
+    const entry = edition === 'ru' ? ruScript : script;
+    try { const result = await exec('bash', [entry, '--yes', '--version', env.RELEASE_VERSION, '--directory', install, ...args], {env: {...env, ...extra}}); return {...result, code: 0}; }
     catch (error) { return { stdout: error.stdout, stderr: error.stderr, code: error.code }; }
   }
   async function calls() { return (await readFile(env.CALLS, 'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse); }
@@ -189,7 +191,7 @@ test('failed read-only upgrade check or new health check restores old image/conf
     const compose=await readFile(join(f.install,'compose.yaml'),'utf8');
     await f.release('v0.3.2');
     const result=await f.run(['--update','--build'],extra);
-    assert.notEqual(result.code,0); assert.match(result.stderr,/Прежний образ запущен/);
+    assert.notEqual(result.code,0); assert.match(result.stderr,/The previous image is running/);
     assert.equal(await readFile(join(f.install,'INSTALLATION.json'),'utf8'),before);
     assert.equal(await readFile(join(f.install,'compose.yaml'),'utf8'),compose);
     await assert.rejects(stat(join(f.install,'update-state.json')),{code:'ENOENT'});
@@ -224,7 +226,7 @@ test('failed rollback retains recoverable state and never removes volume', async
   const f=await fixture(t); assert.equal((await f.run(['--build'])).code,0);
   await f.release('v0.3.2');
   const result=await f.run(['--update','--build'],{FAIL_ROLLBACK:'1'});
-  assert.notEqual(result.code,0); assert.match(result.stderr,/Автоматический запуск прежнего образа не удался/);
+  assert.notEqual(result.code,0); assert.match(result.stderr,/Automatic restart of the previous image failed/);
   const marker=JSON.parse(await readFile(join(f.install,'update-state.json')));
   assert.equal(marker.newVersion,'v0.3.2'); assert.equal(marker.oldVersion,'v0.3.1');
   assert.equal((await f.calls()).some(a=>a[0]==='volume' && a[1]==='rm'),false);
@@ -239,17 +241,62 @@ test('symlink paths are rejected and latest release is resolved to a fixed versi
   assert.equal(JSON.parse(await readFile(join(f.install,'INSTALLATION.json'))).version,'v0.3.1');
 });
 
-test('truncated curl pipe cannot perform a partial installation', async t => {
-  const f=await fixture(t); const body=await readFile(script,'utf8');
-  const child=spawn('bash',['-s','--','--yes','--version','v0.3.1','--directory',f.install],{env:f.env,stdio:['pipe','ignore','ignore']});
-  child.stdin.end(body.slice(0,body.indexOf('finished=true\nif $updating')));
-  await new Promise(resolve=>child.on('exit',resolve));
+test('both generated installers have localized help and reject language-code injection as an unknown option', async t => {
+  await exec('node',['scripts/generate-installers.mjs','--check']);
+  const f=await fixture(t);
+  for (const [entry, locale] of [[script,'en'],[ruScript,'ru']]) {
+    const help=await exec('bash',[entry,'--help'],{env:{...f.env,LANG:'unsupported',LANGUAGE:'$(touch /tmp/invalid-installer-language)'}});
+    assert.match(help.stdout,locale==='en'?/Install or update/:/Установка и обновление/);
+    assert.match(help.stdout,locale==='en'?/download\/install\.sh/:/download\/install-ru\.sh/);
+    if(locale==='en') assert.doesNotMatch(help.stdout,/[А-Яа-яЁё]/);
+    const error=await f.run(['--language','$(touch /tmp/invalid-installer-language)'],{},locale);
+    assert.notEqual(error.code,0); assert.match(error.stderr,locale==='en'?/Unknown option: --language/:/Неизвестный параметр: --language/);
+    const portError=await f.run(['--port','0'],{},locale);
+    assert.notEqual(portError.code,0);assert.match(portError.stderr,locale==='en'?/port must be between 1 and 65535/:/Порт должен быть 1–65535/);
+  }
   assert.deepEqual(await f.calls(),[]);
-  await assert.rejects(stat(f.install),{code:'ENOENT'});
 });
 
-test('curl-pipe text dialog reads from controlling TTY and leaves script stdin untouched', async t => {
-  const f=await fixture(t);
+test('installer language can change between install and update while keeping the same volume and settings', async t => {
+  for (const [initial, upgraded] of [['en','ru'],['ru','en']]) {
+    const f=await fixture(t);
+    const installed=await f.run(['--build','--port','9241'],{},initial);
+    assert.equal(installed.code,0,installed.stderr);
+    assert.match(installed.stderr,initial==='en'?/Ready\. Web console/:/Готово\. Веб-панель/);
+    const before=JSON.parse(await readFile(join(f.install,'INSTALLATION.json')));
+    await f.release('v0.3.2');
+    const updated=await f.run(['--update','--build'],{},upgraded);
+    assert.equal(updated.code,0,updated.stderr);
+    assert.match(updated.stderr,upgraded==='en'?/Update complete/:/Обновление завершено/);
+    const after=JSON.parse(await readFile(join(f.install,'INSTALLATION.json')));
+    assert.equal(after.volume,before.volume);assert.equal(after.port,9241);assert.equal(after.version,'v0.3.2');
+    assert.equal((await f.calls()).some(a=>a.includes('cp') || a.includes('down') || a[0]==='volume'&&a[1]==='create'),false);
+    assert.equal(await readFile(join(f.install,'source','README.ru.md'),'utf8'),'Русская документация');
+  }
+});
+
+test('Russian installer retains checksum rejection and rollback safeguards', async t => {
+  const f=await fixture(t,'v0.3.1','checksum');
+  const bad=await f.run([],{},'ru');assert.notEqual(bad.code,0);assert.match(bad.stderr,/SHA-256 архива не совпал/);assert.deepEqual(await f.calls(),[]);
+  await f.release('v0.3.1','');assert.equal((await f.run(['--build'],{},'ru')).code,0);
+  const before=await readFile(join(f.install,'INSTALLATION.json'),'utf8');
+  await f.release('v0.3.2','');const failed=await f.run(['--update','--build'],{FAIL_UP:'1'},'ru');
+  assert.notEqual(failed.code,0);assert.match(failed.stderr,/Прежний образ запущен/);
+  assert.equal(await readFile(join(f.install,'INSTALLATION.json'),'utf8'),before);
+});
+
+test('truncated downloads of either standalone installer cannot perform a partial installation', async t => {
+  for(const entry of [script,ruScript]){
+    const f=await fixture(t); const body=await readFile(entry,'utf8');
+    const child=spawn('bash',['-s','--','--yes','--version','v0.3.1','--directory',f.install],{env:f.env,stdio:['pipe','ignore','ignore']});
+    child.stdin.end(body.slice(0,body.indexOf('finished=true\nif $updating')));
+    await new Promise(resolve=>child.on('exit',resolve));
+    assert.deepEqual(await f.calls(),[]);
+    await assert.rejects(stat(f.install),{code:'ENOENT'});
+  }
+});
+
+async function pipeDialog(f, entry, mode='text', extra={}) {
   const program = `import os,pty,select,subprocess,sys,time
 master,slave=pty.openpty()
 def session():
@@ -257,19 +304,52 @@ def session():
  import fcntl,termios
  fcntl.ioctl(slave,termios.TIOCSCTTY,0)
 p=subprocess.Popen(['bash','-c','cat "$1" | bash -s -- --version v0.3.1 --directory "$2"','installer-pipe',sys.argv[1],sys.argv[2]],stdin=slave,stdout=slave,stderr=slave,preexec_fn=session,close_fds=True)
-os.close(slave);output=b'';answers=[b'\\n',b'\\n',b'\\n',b'\\n',b'yes\\n'];sent=0;deadline=time.monotonic()+20
+os.close(slave);output=b'';answers=[b'\\n',b'\\n',b'\\n',b'\\n',('да\\n' if sys.argv[1].endswith('install-ru.sh') else 'yes\\n').encode()];sent=0;deadline=time.monotonic()+20
 while time.monotonic()<deadline:
  ready,_,_=select.select([master],[],[],.1)
  if ready:
   try:chunk=os.read(master,65536)
   except OSError:break
   output+=chunk
-  if (b']: ' in chunk or b'[yes' in chunk or 'Продолжить?'.encode() in chunk) and sent<len(answers):os.write(master,answers[sent]);sent+=1
+  if sys.argv[3]=='text' and (b']: ' in chunk or b'[yes' in chunk or 'Продолжить?'.encode() in chunk) and sent<len(answers):os.write(master,answers[sent]);sent+=1
  if p.poll() is not None:break
 if p.poll() is None:p.kill();p.wait();print(output.decode(errors='replace'));raise SystemExit('TTY timeout')
 print(output.decode(errors='replace'));raise SystemExit(p.returncode)
 `;
-  const result=await exec('python3',['-c',program,script,f.install],{env:f.env,timeout:25000,maxBuffer:1024*1024});
-  assert.match(result.stdout,/Продолжить/);
-  assert.equal(JSON.parse(await readFile(join(f.install,'INSTALLATION.json'))).version,'v0.3.1');
+  return exec('python3',['-c',program,entry,f.install,mode],{env:{...f.env,...extra},timeout:25000,maxBuffer:1024*1024});
+}
+
+test('both curl-pipe text dialogs read the controlling TTY and accept the local affirmative answer', async t => {
+  for(const entry of [script,ruScript]){
+    const f=await fixture(t);
+    const result=await pipeDialog(f,entry);
+    assert.match(result.stdout,entry===script?/Continue/:/Продолжить/);
+    assert.equal(JSON.parse(await readFile(join(f.install,'INSTALLATION.json'))).version,'v0.3.1');
+  }
+});
+
+test('whiptail editions localize buttons, read the TTY and capture selected values rather than consuming piped code', async t => {
+  for(const [entry,labels] of [[script,['Continue','Cancel','Yes','No']],[ruScript,['Продолжить','Отмена','Да','Нет']]]){
+    const f=await fixture(t);const dialogLog=join(f.dir,'dialog-calls');
+    const fake=`#!/usr/bin/env python3
+import os,sys,json
+args=sys.argv[1:]
+assert os.isatty(0),'Dialog stdin must be the controlling TTY'
+with open(os.environ['DIALOG_CALLS'],'a') as file:file.write(json.dumps(args)+'\\n')
+if '--inputbox' in args:
+ value=args[-1]
+ if value=='9000':value='9444'
+ print(value,file=sys.stderr)
+`;
+    const path=join(f.dir,'bin','whiptail');await writeFile(path,fake);await chmod(path,0o755);
+    await pipeDialog(f,entry,'dialog',{TERM:'xterm',DIALOG_CALLS:dialogLog});
+    const calls=(await readFile(dialogLog,'utf8')).trim().split('\n').map(JSON.parse);
+    assert.equal(calls.length,5);
+    for(const call of calls.filter(a=>a.includes('--inputbox'))){
+      assert.equal(call[call.indexOf('--ok-button')+1],labels[0]);assert.equal(call[call.indexOf('--cancel-button')+1],labels[1]);
+    }
+    const confirm=calls.find(a=>a.includes('--yesno'));
+    assert.equal(confirm[confirm.indexOf('--yes-button')+1],labels[2]);assert.equal(confirm[confirm.indexOf('--no-button')+1],labels[3]);
+    assert.equal(JSON.parse(await readFile(join(f.install,'INSTALLATION.json'))).port,9444,'The selected whiptail value must reach the config');
+  }
 });

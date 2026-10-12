@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createFeatures } from '../web/features.js';
+import { setLanguage } from '../web/i18n.js';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 async function until(predicate) { for (let n=0;n<200;n++) { if(predicate())return; await tick(); } assert.fail('UI task did not settle'); }
@@ -10,7 +11,7 @@ const deferred=()=>{let resolve;const promise=new Promise(done=>resolve=done);re
 function harness(t) {
   const savedGlobals = Object.fromEntries(['document','localStorage','XMLHttpRequest'].map(name=>[name,globalThis[name]]));
   t.after(()=>{for(const [key,value] of Object.entries(savedGlobals)){if(value===undefined)delete globalThis[key];else globalThis[key]=value;}});
-  globalThis.document={addEventListener(){}};
+  globalThis.document={documentElement:{},addEventListener(){}};setLanguage('en');
   const local = new Map();globalThis.localStorage={getItem:key=>local.get(key),setItem:(key,value)=>local.set(key,value)};
   const state={user:'alice',role:'operator',page:'overview',bucket:'photos',prefix:'',uploads:[],uploadConcurrency:3,csrf:'session-only'};
   const calls=[], parts=new Map();let serverUploads=[];
@@ -56,6 +57,6 @@ test('multipart rejects a changed source before upload and clears prior user que
   parts.set(1,{partNumber:1,etag:'"existing"',sha256:'0'.repeat(64),size:5});
   const item=state.uploads[0];item.file=new File(['other'],'file.txt');
   await features.click('upload-resume',{dataset:{upload:item.id}});await until(()=>item.status==='error');
-  assert.match(item.error,/не совпадает/);assert.equal(calls.filter(call=>call.part||call.path?.includes('/complete')).length,0);
+  assert.match(item.error,/does not match/);assert.equal(calls.filter(call=>call.part||call.path?.includes('/complete')).length,0);
   state.uploads.push({id:'completed',key:'private-name',status:'done'});state.user='bob';setServerUploads([]);await features.restoreUploads();assert.deepEqual(state.uploads,[]);
 });

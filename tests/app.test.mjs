@@ -53,7 +53,7 @@ test('complete web and S3 workflow: default login, CSRF, permissions, persistenc
   async function api(path, method = 'GET', value, headers = {}) {
     return fetch(`${endpoint}/api${path}`, { method, headers: { ...(cookie ? { cookie } : {}), ...(csrf ? { 'x-csrf-token': csrf } : {}), ...(value === undefined ? {} : { 'content-type': 'application/json' }), ...headers }, ...(value === undefined ? {} : { body: JSON.stringify(value) }) });
   }
-  let response = await api('/session'); assert.deepEqual(await response.json(), { authenticated: false, defaultCredentials: true, setupTokenRequired: false });
+  let response = await api('/session'); assert.deepEqual(await response.json(), { authenticated: false, defaultCredentials: true, setupTokenRequired: false, language: 'en' });
   response = await api('/status'); assert.equal(response.status, 401);
   response = await api('/login', 'POST', { username: DEFAULT_ADMIN_USERNAME, password: DEFAULT_ADMIN_PASSWORD }); assert.equal(response.status, 200);
   cookie = response.headers.get('set-cookie').split(';')[0]; csrf = (await response.json()).csrf;
@@ -155,7 +155,7 @@ test('factory login requires server token on wildcard listeners, public origins,
     app.server.listen(0, scenario.host); await once(app.server, 'listening');
     const endpoint = `http://127.0.0.1:${app.server.address().port}`;
     const state = await rawRequest(endpoint, 'GET', '/api/session');
-    assert.deepEqual(JSON.parse(state.body), { authenticated: false, defaultCredentials: true, setupTokenRequired: true });
+    assert.deepEqual(JSON.parse(state.body), { authenticated: false, defaultCredentials: true, setupTokenRequired: true, language: 'en' });
     assert.ok(!state.body.includes(setupToken));
     const login = (token, headers = {}) => rawRequest(endpoint, 'POST', '/api/login', {
       headers: { 'content-type': 'application/json', ...headers },
@@ -184,7 +184,7 @@ test('factory login requires server token on wildcard listeners, public origins,
     assert.equal(changed.status, 200);
     assert.equal(JSON.parse(changed.body).defaultCredentials, false);
     const updatedState = await rawRequest(endpoint, 'GET', '/api/session');
-    assert.deepEqual(JSON.parse(updatedState.body), { authenticated: false, defaultCredentials: false, setupTokenRequired: false });
+    assert.deepEqual(JSON.parse(updatedState.body), { authenticated: false, defaultCredentials: false, setupTokenRequired: false, language: 'en' });
     const customLogin = await rawRequest(endpoint, 'POST', '/api/login', {
       headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'admin', password }),
     });
