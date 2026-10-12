@@ -2,12 +2,14 @@
 
 Установщик разворачивает один координатор с веб-панелью и локальным хранилищем в Docker. При повторном запуске он распознаёт установленный им экземпляр и предлагает совместимое обновление образа с сохранением подключённого volume. После запуска бакеты, пользователей, ключи и узлы можно настраивать через браузер. Для отказоустойчивого master/slave используйте отдельную [инструкцию HA](HA.md); для подключения дисков другого сервера — команду **«Кластер → Подключить сервер»** и [инструкцию дискового агента](DISKS.md).
 
+Установщик доступен в двух самостоятельных версиях: **install.sh — English**, **install-ru.sh — Русский**. В этом руководстве команды используют русскую версию; замените имя файла на `install.sh` для английских диалогов. Параметры и правила обновления одинаковые. Язык установщика не меняет язык панели: по умолчанию English, а Русский выбирается после входа в **Settings → Language** и сохраняется в учётной записи.
+
 ## Одна команда
 
 В терминале Linux:
 
 ```sh
-curl -fsSL https://github.com/gadmin2151/27G-StorageS3/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/gadmin2151/27G-StorageS3/releases/latest/download/install-ru.sh | bash
 ```
 
 Нужны `bash`, `curl`, `python3`, `sha256sum`, Docker Engine с плагином Compose 2.20+ и доступ root либо `sudo`. Поддерживаются Linux `amd64` и `arm64`. Node.js на сервер устанавливать не нужно: он уже входит в контейнер.
@@ -42,7 +44,7 @@ curl -fsSL https://github.com/gadmin2151/27G-StorageS3/releases/latest/download/
 Команда через pipe доверяет полученному по HTTPS установщику. Контрольная сумма архива проверяется уже внутри него; это не независимая подпись самого скрипта. Если нужно предварительно изучить код, скачайте файл и запустите после просмотра:
 
 ```sh
-curl -fsSL -o install.sh https://github.com/gadmin2151/27G-StorageS3/releases/latest/download/install.sh
+curl -fsSL -o install.sh https://github.com/gadmin2151/27G-StorageS3/releases/latest/download/install-ru.sh
 less install.sh
 bash install.sh
 ```
@@ -68,14 +70,14 @@ sudo docker compose -f /opt/27g-storage-s3/compose.yaml exec -T app cat /data/se
 Параметры передаются после `bash -s --`:
 
 ```sh
-curl -fsSL https://github.com/gadmin2151/27G-StorageS3/releases/latest/download/install.sh | bash -s -- --version v0.3.1 --directory /opt/27g-storage-s3 --port 9000
+curl -fsSL https://github.com/gadmin2151/27G-StorageS3/releases/latest/download/install-ru.sh | bash -s -- --version v0.3.2 --directory /opt/27g-storage-s3 --port 9000
 ```
 
 | Параметр | Действие |
 |---|---|
 | `--yes` | Установка без вопросов с указанными параметрами и безопасными значениями по умолчанию |
 | `--update` | Явно разрешить обновление найденной установки; при автоматическом запуске требуется вместе с `--yes` |
-| `--version v0.3.1` | Выбрать конкретный релиз; по умолчанию `latest` |
+| `--version v0.3.2` | Выбрать конкретный релиз; по умолчанию `latest` |
 | `--directory /opt/27g-storage-s3` | Каталог конфигурации и исходников |
 | `--port 9000` | Опубликованный порт хоста |
 | `--bind 127.0.0.1` | Только локальный доступ; также допустимы `0.0.0.0` и конкретный IPv4 |
@@ -87,7 +89,7 @@ curl -fsSL https://github.com/gadmin2151/27G-StorageS3/releases/latest/download/
 Для автоматизации заранее обеспечьте root или доступ `sudo` без интерактивного пароля; `--yes` не отменяет политику `sudo`. Пример с установленным Docker:
 
 ```sh
-curl -fsSL https://github.com/gadmin2151/27G-StorageS3/releases/download/v0.3.1/install.sh | bash -s -- --yes --version v0.3.1 --directory /opt/27g-storage-s3 --bind 127.0.0.1 --port 9000
+curl -fsSL https://github.com/gadmin2151/27G-StorageS3/releases/download/v0.3.2/install-ru.sh | bash -s -- --yes --version v0.3.2 --directory /opt/27g-storage-s3 --bind 127.0.0.1 --port 9000
 ```
 
 С `--yes` скрипт не должен угадывать разрешение на установку Docker или локальную сборку после ошибки загрузки образа. Для этих действий передайте соответственно `--install-docker` или `--build`.
@@ -116,13 +118,13 @@ GitHub Actions выпускает новые образы и релизные ф
 Используйте ту же команду, что при установке, и укажите прежний каталог, если он отличается от стандартного:
 
 ```sh
-curl -fsSL https://github.com/gadmin2151/27G-StorageS3/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/gadmin2151/27G-StorageS3/releases/latest/download/install-ru.sh | bash
 ```
 
 Мастер показывает установленную и предлагаемую версии и спрашивает подтверждение. В автоматизации разрешение на обновление задаётся явно:
 
 ```sh
-curl -fsSL https://github.com/gadmin2151/27G-StorageS3/releases/latest/download/install.sh | bash -s -- --yes --update --directory /opt/27g-storage-s3
+curl -fsSL https://github.com/gadmin2151/27G-StorageS3/releases/latest/download/install-ru.sh | bash -s -- --yes --update --directory /opt/27g-storage-s3
 ```
 
 Можно выбрать конкретную более новую версию через `--version vX.Y.Z`. При совпадении версий изменений нет; переход на более старую версию отклоняется. `--update` не создаёт новую установку, если по выбранному пути нет действующего экземпляра.
