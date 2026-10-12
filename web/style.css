@@ -653,3 +653,18 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: 4px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* Temporary object links */
+.share-object-name { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 16px; }
+.share-object-name .icon { flex-shrink: 0; color: var(--accent); }
+.share-object-name strong { overflow-wrap: anywhere; }
+.share-list { list-style: none; margin: 12px 0; padding: 0; max-height: 220px; overflow-y: auto; }
+.share-list li { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.share-list strong, .share-list small { display: block; }
+.share-list strong { font-size: 12px; }
+.share-list small { color: var(--muted); font-size: 11px; margin-top: 4px; }
+.share-local-note { margin: 16px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+
+.share-duration { border: 0; padding: 0; margin: 20px 0 0; min-width: 0; }
+.share-duration legend { font-size: 13px; font-weight: 600; margin-bottom: 14px; }
+.share-duration p { margin: 12px 0 0; }

@@ -30,7 +30,7 @@ async function digestFile(path) {
   return { size, sha256: sha.digest('hex') };
 }
 function validBucket(name) {
-  if (['api', 'console', 'healthz'].includes(name)) fail('InvalidBucketName', 'This bucket name is reserved for the control panel.');
+  if (['api', 'console', 'healthz', 'share'].includes(name)) fail('InvalidBucketName', 'This bucket name is reserved for the control panel.');
   if (typeof name !== 'string' || name.length < 3 || name.length > 63 || !/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(name) || name.includes('..') || name.includes('.-') || name.includes('-.') || /^\d+\.\d+\.\d+\.\d+$/.test(name) || /^(xn--|sthree-|amzn-s3-demo-)/.test(name) || /(-s3alias|--ol-s3|\.mrap|--x-s3|--table-s3)$/.test(name)) fail('InvalidBucketName', 'Bucket names must be DNS-compatible, 3–63 lowercase characters.');
 }
 function validKey(key) { if (typeof key !== 'string' || !key.length || Buffer.byteLength(key) > 1024 || key.includes('\0')) fail('InvalidArgument', 'Object key must contain 1–1024 UTF-8 bytes and no NUL.'); }
@@ -153,7 +153,12 @@ export class Storage {
       } finally { await clean(temporary); }
     });
   }
-  async headObject(bucket, key) { return metadata(this._object(bucket, key)); }
+  objectGeneration(bucket, key) { return this._object(bucket, key).blob_id; }
+  async headObject(bucket, key, { expectedBlobId } = {}) {
+    const row = this._object(bucket, key);
+    if (expectedBlobId !== undefined && row.blob_id !== expectedBlobId) fail('NoSuchKey', 'The specified object does not exist.', 404);
+    return metadata(row);
+  }
   async _verifiedReplica(node, row) {
     if (node.url === 'local') { const path = join(this.blobDir, row.blob_id); const info = await digestFile(path); if (info.size !== row.size || info.sha256 !== row.sha256) throw new Error('Replica checksum mismatch'); return { path, temporary: false }; }
     const response = await this._fetch(node, `/blobs/${row.blob_id}`);
@@ -161,8 +166,10 @@ export class Storage {
     const path = join(this.tempDir, randomUUID());
     try { const info = await writeStreamFile(path, Readable.fromWeb(response.body), Math.min(this.maxObjectBytes, row.size)); if (info.size !== row.size || info.sha256 !== row.sha256) throw new Error('Replica checksum mismatch'); return { path, temporary: true }; } catch (error) { await clean(path); throw error; }
   }
-  async getObject(bucket, key) {
-    const row = this._object(bucket, key); const cacheKey = `${bucket}\0${key}`, cached = this.cache.get(cacheKey);
+  async getObject(bucket, key, { expectedBlobId } = {}) {
+    const row = this._object(bucket, key);
+    if (expectedBlobId !== undefined && row.blob_id !== expectedBlobId) fail('NoSuchKey', 'The specified object does not exist.', 404);
+    const cacheKey = `${bucket}\0${key}`, cached = this.cache.get(cacheKey);
     if (cached?.id === row.blob_id) { this.hits++; this.cache.delete(cacheKey); this.cache.set(cacheKey, cached); return { metadata: metadata(row), stream: Readable.from([cached.data]) }; }
     this.misses++; this.readers.set(row.blob_id, (this.readers.get(row.blob_id) || 0) + 1);
     try {

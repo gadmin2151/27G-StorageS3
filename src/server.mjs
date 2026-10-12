@@ -8,6 +8,7 @@ import { pipeline } from 'node:stream/promises';
 import { Storage } from './storage.mjs';
 import { handleS3 } from './s3.mjs';
 import { Auth, ApiError } from './auth.mjs';
+import { Shares } from './shares.mjs';
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../web');
 const VERSION = '0.1.0';
@@ -106,7 +107,7 @@ export async function createApp(options = {}) {
   const publicOrigin = options.publicOrigin ?? process.env.PUBLIC_ORIGIN ?? '';
   if (publicOrigin && !/^https?:\/\/[^/]+$/.test(publicOrigin)) { await releaseLock(); throw new Error('PUBLIC_ORIGIN must be an http(s) origin, without a trailing slash'); }
   const secureCookies = publicOrigin.startsWith('https://');
-  let auth, storage;
+  let auth, storage, shares;
   try {
     const maxObjectBytes = int(options.maxObjectBytes ?? process.env.MAX_OBJECT_BYTES, 5 * 1024 ** 3, 1, 5 * 1024 ** 3, 'MAX_OBJECT_BYTES');
     storage = new Storage({ dataDir, maxObjectBytes,
@@ -117,6 +118,7 @@ export async function createApp(options = {}) {
     await storage.init();
     auth = new Auth({ dataDir, secureCookies, setupToken: options.setupToken ?? process.env.SETUP_TOKEN });
     await auth.initializeDefaults();
+    shares = new Shares({ dataDir });
     const started = Date.now();
     const trustedProxyIPs = (options.trustedProxyIPs ?? process.env.TRUSTED_PROXY_IPS ?? '').split(',').map(value => value.trim()).filter(Boolean);
     if (trustedProxyIPs.some(ip => !isIP(ip))) throw new Error('TRUSTED_PROXY_IPS must be a comma-separated list of exact IP addresses');
@@ -185,7 +187,7 @@ export async function createApp(options = {}) {
         if (method === 'GET') return json(res, 200, { buckets: await storage.buckets() });
         if (method === 'POST') {
           const { name } = await bodyJSON(req);
-          if (['api', 'console', 'healthz'].includes(name)) throw new ApiError(400, 'Это имя зарезервировано системой.');
+          if (['api', 'console', 'healthz', 'share'].includes(name)) throw new ApiError(400, 'Это имя зарезервировано системой.');
           await storage.createBucket(name); auth.audit('bucket.created', name); return json(res, 201, { name });
         }
       }
@@ -219,6 +221,21 @@ export async function createApp(options = {}) {
         if (method === 'DELETE') {
           await storage.deleteObject(bucket, key); auth.audit('object.deleted', `${bucket}/${key}`); return json(res, 200, { ok: true });
         }
+      }
+      if (path === '/api/shares' && ['GET', 'POST'].includes(method)) {
+        const input = method === 'POST' ? await bodyJSON(req) : { bucket: url.searchParams.get('bucket'), key: url.searchParams.get('key') };
+        if (typeof input.bucket !== 'string' || !input.bucket || typeof input.key !== 'string' || !input.key)
+          throw new ApiError(400, 'Укажите бакет и ключ объекта.');
+        const blobId = await storage.objectGeneration(input.bucket, input.key);
+        if (method === 'GET') return json(res, 200, { shares: shares.list(input.bucket, input.key, blobId) });
+        const { token, ...created } = shares.create({ ...input, blobId });
+        auth.audit('share.created', `${created.id}; ${input.bucket}/${input.key}`);
+        return json(res, 201, { ...created, url: `${publicOrigin || `http://${req.headers.host}`}/share/${token}` });
+      }
+      if (path.startsWith('/api/shares/') && method === 'DELETE') {
+        const id = path.slice('/api/shares/'.length);
+        shares.revoke(id); auth.audit('share.revoked', id);
+        return json(res, 200, { ok: true });
       }
       if (path === '/api/topology') {
         if (method === 'GET') return json(res, 200, await storage.topology());
@@ -266,6 +283,44 @@ export async function createApp(options = {}) {
       if (path === '/api/audit' && method === 'GET') return json(res, 200, { events: auth.events() });
       throw new ApiError(404, 'Метод API не найден.');
     }
+    async function publicShare(req, res, rawPath) {
+      // This route never reads admin cookies or S3 credentials. The unguessable
+      // URL grants access only to one immutable object generation until expiry.
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
+      const match = /^\/share\/([A-Za-z0-9_-]{43})$/.exec(rawPath);
+      const unavailable = () => new ApiError(404, 'Ссылка недействительна или срок её действия истёк.');
+      if (!match) throw unavailable();
+      if (!['GET', 'HEAD'].includes(req.method)) {
+        res.setHeader('Allow', 'GET, HEAD');
+        throw new ApiError(405, 'Ссылка доступна только для просмотра и скачивания.');
+      }
+      const share = shares.get(match[1]);
+      if (!share) throw unavailable();
+      let result;
+      try {
+        const options = { expectedBlobId: share.blob_id };
+        result = req.method === 'HEAD'
+          ? { metadata: await storage.headObject(share.bucket, share.object_key, options) }
+          : await storage.getObject(share.bucket, share.object_key, options);
+        // A remote replica read may finish after a revocation, replacement or
+        // expiry. Recheck before sending headers; ongoing downloads may finish.
+        if (storage.objectGeneration(share.bucket, share.object_key) !== share.blob_id || !shares.get(match[1]))
+          throw unavailable();
+      } catch (error) {
+        result?.stream?.destroy();
+        if (error.status === 404) throw unavailable();
+        throw error;
+      }
+      const { metadata, stream } = result;
+      const storedType = metadata.contentType.split(';', 1)[0].trim().toLowerCase();
+      const inline = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif'].includes(storedType);
+      const filename = share.object_key.split('/').pop().replace(/[\r\n]/g, '_');
+      res.writeHead(200, { 'Content-Type': inline ? storedType : 'application/octet-stream', 'Content-Length': metadata.size,
+        'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="download"; filename*=UTF-8''${encodeURIComponent(filename).replace(/'/g, '%27')}` });
+      if (req.method === 'HEAD') { res.end(); return; }
+      await pipeline(stream, res);
+    }
     const server = http.createServer({ maxHeaderSize: 16 * 1024, requestTimeout: 15 * 60_000, headersTimeout: 15_000, keepAliveTimeout: 5000 }, async (req, res) => {
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('X-Frame-Options', 'DENY');
@@ -277,6 +332,10 @@ export async function createApp(options = {}) {
         // URL.pathname normalizes dot segments, but dots are literal S3 object-key bytes.
         const rawPath = req.url.split('?', 1)[0];
         if (rawPath === '/healthz' && req.method === 'GET') return json(res, 200, { status: 'ok' });
+        // Preserve authenticated S3 access to buckets named "share" created by
+        // older versions. New bucket creation reserves this name in Storage.
+        if (rawPath.startsWith('/share/') && !req.headers.authorization && !new URL(req.url, 'http://localhost').searchParams.has('X-Amz-Algorithm'))
+          return await publicShare(req, res, rawPath);
         if (rawPath.startsWith('/api/')) return await admin(req, res, new URL(req.url, 'http://localhost'));
         if (staticFiles.has(rawPath) && ['GET', 'HEAD'].includes(req.method)) {
           const [file, type] = staticFiles.get(rawPath), content = await readFile(join(webRoot, file));
@@ -306,12 +365,13 @@ export async function createApp(options = {}) {
         server.close(err => err ? reject(err) : done()); server.closeIdleConnections();
       });
       if (background) await background;
-      await storage.close(); auth.close(); await releaseLock();
+      await storage.close(); auth.close(); shares.close(); await releaseLock();
     }
-    return { server, storage, auth, close };
+    return { server, storage, auth, shares, close };
   } catch (err) {
     try { await storage?.close(); } catch {}
     try { auth?.close(); } catch {}
+    try { shares?.close(); } catch {}
     await releaseLock(); throw err;
   }
 }
