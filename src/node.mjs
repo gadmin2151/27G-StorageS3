@@ -54,6 +54,6 @@ export async function createNodeServer({ dataDir = process.env.DATA_DIR || './da
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const server = await createNodeServer(); const port = Number(process.env.NODE_PORT || 9100), host = process.env.HOST || '127.0.0.1';
-  server.listen(port, host, () => console.log(`27g-StoregeS3 node listening on ${host}:${port}`));
+  server.listen(port, host, () => console.log(`27G-StorageS3 node listening on ${host}:${port}`));
   const stop = () => { server.close(() => process.exit(0)); setTimeout(() => process.exit(1), 10000).unref(); }; process.on('SIGTERM', stop); process.on('SIGINT', stop);
 }

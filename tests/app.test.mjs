@@ -83,7 +83,7 @@ test('complete web and S3 workflow: default login, CSRF, permissions, persistenc
   response = await api('/settings', 'PUT', { cacheBytes: 1048576, concurrency: 2 }); assert.equal(response.status, 200);
   response = await api('/topology'); assert.equal((await response.json()).nodes[0].id, 'local');
   response = await api('/scrub', 'POST'); assert.equal(response.status, 200);
-  response = await fetch(`${endpoint}/console/`); assert.equal(response.status, 200); assert.match(response.headers.get('content-security-policy'), /frame-ancestors 'none'/); assert.match(await response.text(), /27g-StoregeS3/);
+  response = await fetch(`${endpoint}/console/`); assert.equal(response.status, 200); assert.match(response.headers.get('content-security-policy'), /frame-ancestors 'none'/); assert.match(await response.text(), /27G-StorageS3/);
   await assert.rejects(createApp({ dataDir, setupToken }), /already owned/);
   await app.close(); app = null;
   app = await createApp({ dataDir, setupToken }); app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening'); endpoint = `http://127.0.0.1:${app.server.address().port}`;

@@ -1,4 +1,4 @@
-# Функции и приоритеты развития 27g-StoregeS3
+# Функции и приоритеты развития 27G-StorageS3
 
 Исследование от **12 октября 2026 года**. Состояние нашего проекта сверено с версией 0.1.0, коммитом `bdc959b7100e932d1f07028affae30b3edb8eac9`, исходным кодом и [матрицей S3](S3-COMPATIBILITY.md). Возможности других продуктов проверены по официальной документации; сами продукты в рамках исследования не разворачивались, сравнительных замеров скорости нет.
 
@@ -17,7 +17,7 @@
 
 Из документированных возможностей CE полезно взять за ориентир:
 
-| Возможность | Польза для 27g-StoregeS3 | Документация CE |
+| Возможность | Польза для 27G-StorageS3 | Документация CE |
 | --- | --- | --- |
 | Версии объектов и lifecycle | Восстановление прежнего файла, управление накопившимися версиями | [Versioning](https://raw.githubusercontent.com/minio/minio/RELEASE.2025-10-15T17-29-55Z/docs/bucket/versioning/README.md), [lifecycle](https://raw.githubusercontent.com/minio/minio/RELEASE.2025-10-15T17-29-55Z/docs/bucket/lifecycle/README.md) |
 | Object Lock | Защита резервных копий от удаления в течение заданного срока | [Retention](https://raw.githubusercontent.com/minio/minio/RELEASE.2025-10-15T17-29-55Z/docs/bucket/retention/README.md) |

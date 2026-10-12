@@ -14,9 +14,12 @@ import { Monitor } from './monitor.mjs';
 import { normalizePublicOrigin, normalizeCorsOrigins, applyS3Cors } from './service-settings.mjs';
 import { HaCoordinator } from './ha.mjs';
 import { CommitResponse } from './ha-response.mjs';
+import { objectPreview } from './preview.mjs';
+import { BucketPolicies } from './bucket-policy.mjs';
+import { AgentEnrollment } from './agent-enrollment.mjs';
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../web');
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 const mutations = new Set(['POST', 'PUT', 'DELETE', 'PATCH']);
 const staticFiles = new Map([
   ['/console', ['index.html', 'text/html; charset=utf-8']],
@@ -25,6 +28,7 @@ const staticFiles = new Map([
   ['/console/features.js', ['features.js', 'text/javascript; charset=utf-8']],
   ['/console/style.css', ['style.css', 'text/css; charset=utf-8']],
   ['/console/storage-mark.svg', ['storage-mark.svg', 'image/svg+xml']],
+  ['/console/brand-mark.png', ['brand-mark.png', 'image/png']],
 ]);
 const json = (res, status, value) => {
   const body = JSON.stringify(value);
@@ -136,6 +140,8 @@ export async function createApp(options = {}) {
     auth = new Auth({ dataDir, secureCookies, setupToken: options.setupToken ?? process.env.SETUP_TOKEN });
     await auth.initializeDefaults();
     shares = new Shares({ dataDir });
+    const bucketPolicies = new BucketPolicies({ auth, storage });
+    const enrollment = new AgentEnrollment({ auth });
     const monitor = new Monitor(auth);
     let scrubIntervalSeconds = auth.preference('scrubIntervalSeconds', 900);
     let lastScrub = auth.preference('lastScrubAt', null);
@@ -212,6 +218,19 @@ export async function createApp(options = {}) {
       const personal = ['/api/logout', '/api/password', '/api/mfa/enroll', '/api/mfa/confirm', '/api/mfa/disable'];
       if (mutation && session.role === 'viewer' && !personal.includes(path)) throw new ApiError(403, 'Роль наблюдателя разрешает только чтение.');
       if (mutation && session.role !== 'admin' && ['/api/settings', '/api/topology', '/api/scrub'].includes(path)) throw new ApiError(403, 'Это действие доступно только администратору.');
+      if (path === '/api/preview' && method === 'GET') return await objectPreview(req, res, url, { storage, json });
+      if (path === '/api/bucket-access') {
+        if (session.role !== 'admin') throw new ApiError(403, 'Политика доступа доступна только администратору.');
+        const bucket = url.searchParams.get('bucket');
+        if (method === 'GET') return json(res, 200, await bucketPolicies.get(bucket));
+        if (method === 'PUT') { const policy = await bucketPolicies.set(bucket, await bodyJSON(req)); auth.audit('bucket.access_changed', `${bucket}; ${policy.mode}`); return json(res, 200, policy); }
+      }
+      if (path === '/api/agent-enrollments' || path.startsWith('/api/agent-enrollments/')) {
+        if (session.role !== 'admin') throw new ApiError(403, 'Подключение сервера доступно только администратору.');
+        if (path === '/api/agent-enrollments' && method === 'GET') return json(res, 200, { enrollments: enrollment.list() });
+        if (path === '/api/agent-enrollments' && method === 'POST') return json(res, 201, await enrollment.create(await bodyJSON(req), { origin: publicOrigin || `http://${req.headers.host}`, owner: session.user }));
+        if (path.startsWith('/api/agent-enrollments/') && method === 'DELETE') { enrollment.revoke(path.slice('/api/agent-enrollments/'.length)); return json(res, 200, { ok: true }); }
+      }
       if (await featureAPI(req, res, url, { auth, storage, session, json: (...args) => { json(...args); return true; }, bodyJSON, clientIP, monitor, getHa: () => ha, publicOrigin })) return;
       if (path === '/api/logout' && method === 'POST') {
         auth.logout(req); res.setHeader('Set-Cookie', auth.cookie('', true)); return json(res, 200, { ok: true });
@@ -228,7 +247,7 @@ export async function createApp(options = {}) {
           limitations: [ha ? 'HA master/slave: нужен quorum etcd; физическая очистка старых blobs отключена.' : 'Одиночный координатор: для failover включите HA master/slave с арбитром.', 'S3: multipart и последние 5 версий; AWS IAM, streaming signatures и trailers не поддерживаются.', 'Экспериментальная версия: нагрузочные испытания и независимый аудит ещё не проведены.'] });
       }
       if (path === '/api/buckets') {
-        if (method === 'GET') return json(res, 200, { buckets: await storage.buckets() });
+        if (method === 'GET') return json(res, 200, { buckets: await Promise.all((await storage.buckets()).map(async bucket => ({ ...bucket, accessMode: (await bucketPolicies.get(bucket.name)).mode }))) });
         if (method === 'POST') {
           const { name } = await bodyJSON(req);
           if (['api', 'console', 'healthz', 'share'].includes(name)) throw new ApiError(400, 'Это имя зарезервировано системой.');
@@ -237,7 +256,7 @@ export async function createApp(options = {}) {
       }
       if (path.startsWith('/api/buckets/') && method === 'DELETE') {
         const name = decodeURIComponent(path.slice('/api/buckets/'.length));
-        await storage.deleteBucket(name); auth.audit('bucket.deleted', name); return json(res, 200, { ok: true });
+        await storage.deleteBucket(name); bucketPolicies.remove(name); auth.audit('bucket.deleted', name); return json(res, 200, { ok: true });
       }
       if (path === '/api/objects' && method === 'GET') {
         return json(res, 200, await storage.listObjects(url.searchParams.get('bucket'), {
@@ -327,7 +346,10 @@ export async function createApp(options = {}) {
           auth.audit('settings.updated', JSON.stringify({ publicOrigin: nextOrigin, corsOrigins: nextCors, interval })); return json(res, 200, { ok: true });
         }
       }
-      if (path === '/api/audit' && method === 'GET') { if (session.role !== 'admin') throw new ApiError(403, 'Журнал доступен администратору.'); return json(res, 200, { events: auth.events() }); }
+      if (path === '/api/audit' && method === 'GET') {
+        if (session.role !== 'admin') throw new ApiError(403, 'Журнал доступен администратору.');
+        return json(res, 200, auth.eventPage({ page: Number(url.searchParams.get('page') ?? 1), pageSize: Number(url.searchParams.get('pageSize') ?? 10) }));
+      }
       throw new ApiError(404, 'Метод API не найден.');
     }
     async function publicShare(req, res, rawPath) {
@@ -387,6 +409,7 @@ export async function createApp(options = {}) {
         // older versions. New bucket creation reserves this name in Storage.
         if (rawPath.startsWith('/share/') && !req.headers.authorization && !new URL(req.url, 'http://localhost').searchParams.has('X-Amz-Algorithm'))
           return await publicShare(req, res, rawPath);
+        if (rawPath.startsWith('/api/agent-install/') && await enrollment.handlePublic(req, res, new URL(req.url, 'http://localhost'), { json, bodyJSON, peerAddress: clientIP(req) })) return;
         if (rawPath.startsWith('/api/')) return await admin(req, res, new URL(req.url, 'http://localhost'));
         if (staticFiles.has(rawPath) && ['GET', 'HEAD'].includes(req.method)) {
           const [file, type] = staticFiles.get(rawPath), content = await readFile(join(webRoot, file));
@@ -399,7 +422,8 @@ export async function createApp(options = {}) {
         // Apply download isolation to S3 payloads too; S3 requests never use browser admin cookies.
         res.setHeader('Content-Disposition', 'attachment');
         if (applyS3Cors(req, res, auth.preference('corsOrigins', []))) return;
-        await handleS3(req, res, { storage, lookupKey: key => auth.lookupKey(key), region: process.env.S3_REGION || 'us-east-1', maxObjectBytes, publicOrigin });
+        await handleS3(req, res, { storage, lookupKey: key => auth.lookupKey(key), region: process.env.S3_REGION || 'us-east-1', maxObjectBytes, publicOrigin,
+          allowAnonymousRead: (bucket, key) => bucketPolicies.allowsAnonymousRead(bucket, key), onBucketDeleted: bucket => bucketPolicies.remove(bucket) });
       } catch (err) {
         if (res.destroyed) return;
         if (res.headersSent) { res.destroy(); return; }
@@ -441,7 +465,7 @@ export async function createApp(options = {}) {
       if (background) await background;
       await ha?.close(); await storage.close(); auth.close(); shares.close(); await releaseLock();
     }
-    return { server, storage, auth, shares, ha, monitor, close };
+    return { server, storage, auth, shares, ha, monitor, enrollment, bucketPolicies, close };
   } catch (err) {
     try { await ha?.close(); } catch {}
     try { await storage?.close(); } catch {}
@@ -456,7 +480,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const app = await createApp();
   const port = int(process.env.PORT, 9000, 1, 65535, 'PORT'), host = process.env.HOST || '127.0.0.1';
   app.server.listen(port, host, () => {
-    console.log(`27g-StoregeS3 ${VERSION}: http://${host}:${port}/console/`);
+    console.log(`27G-StorageS3 ${VERSION}: http://${host}:${port}/console/`);
     if (app.auth.defaultCredentials) console.log(`Initial setup token: ${app.auth.setupToken}`);
   });
   let stopping = false;

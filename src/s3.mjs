@@ -50,6 +50,12 @@ function header(req, name) {
   return Array.isArray(value) ? value.join(',') : value;
 }
 
+function suppliedAuthentication(req, target) {
+  // Partial, invalid or expired signatures must never fall back to public access.
+  return ['authorization', 'x-amz-date', 'x-amz-content-sha256', 'x-amz-security-token'].some(name => Object.hasOwn(req.headers, name)) ||
+    [...target.query.keys()].some(name => /^(?:x-amz-|awsaccesskeyid$|signature$|expires$)/i.test(name));
+}
+
 function canonicalQuery(query, presigned) {
   return [...query].filter(([key]) => !presigned || key !== 'X-Amz-Signature')
     .map(([key, value]) => [encode(key), encode(value)])
@@ -341,14 +347,26 @@ async function listUploads(res,storage,bucket,query,options){
   for(const prefix of page.commonPrefixes)body+=`<CommonPrefixes>${tag('Prefix',text(prefix))}</CommonPrefixes>`;xmlResponse(res,200,`<ListMultipartUploadsResult xmlns="${XMLNS}">${body}</ListMultipartUploadsResult>`);
 }
 
-/** Path-style, authenticated S3 subset. Unsupported features are rejected explicitly. */
-export async function handleS3(req, res, { storage, lookupKey, region = 'us-east-1', maxObjectBytes = 5 * 1024 ** 3, lookupUserPolicy, publicOrigin = '' }) {
+/** Path-style S3 subset. Anonymous reads require explicit application bucket policy. */
+export async function handleS3(req, res, { storage, lookupKey, region = 'us-east-1', maxObjectBytes = 5 * 1024 ** 3, lookupUserPolicy, publicOrigin = '', allowAnonymousRead, onBucketDeleted }) {
   const requestId = randomBytes(12).toString('hex');
   res.setHeader('x-amz-request-id', requestId);
   res.setHeader('x-amz-bucket-region', region);
   res.setHeader('x-content-type-options', 'nosniff');
   try {
-    const auth = await authenticateS3(req, { lookupKey, region });
+    const target = parseTarget(req.url), split = target.path.indexOf('/', 1);
+    const targetBucket = decodeURIComponent(split < 0 ? target.path.slice(1) : target.path.slice(1, split));
+    const targetKey = split < 0 ? '' : decodeURIComponent(target.path.slice(split + 1));
+    let auth;
+    if (!suppliedAuthentication(req, target) && ['GET', 'HEAD'].includes(req.method) && targetBucket && targetKey && allowAnonymousRead) {
+      if ([...target.query.keys()].some(name => name !== 'x-id') || !await allowAnonymousRead(targetBucket, targetKey))
+        fail('AccessDenied', 403, 'Anonymous access to this object is not allowed.');
+      auth = { ...target, anonymous: true, presigned: false, payloadHash: 'UNSIGNED-PAYLOAD',
+        account: { role: 'readonly', permissions: ['read'], buckets: [targetBucket] } };
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Disposition', 'attachment');
+      res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
+    } else auth = await authenticateS3(req, { lookupKey, region });
     // SDK presigners move checksum headers into the signed query string.
     if (auth.presigned) for (const [name, value] of auth.query) {
       if (!HOISTED_HEADERS.has(name)) continue;
@@ -408,7 +426,7 @@ export async function handleS3(req, res, { storage, lookupKey, region = 'us-east
         }
         await storage.createBucket(bucket); res.writeHead(200, { location: `/${encode(bucket)}`, 'content-length': '0' }); res.end(); return;
       }
-      if (req.method === 'DELETE') { await storage.deleteBucket(bucket); res.writeHead(204); res.end(); return; }
+      if (req.method === 'DELETE') { await storage.deleteBucket(bucket); await onBucketDeleted?.(bucket); res.writeHead(204); res.end(); return; }
       if (req.method === 'HEAD') {
         await storage.listObjects(bucket, { maxKeys: 0 }); res.writeHead(200, { 'content-length': '0' }); res.end(); return;
       }
@@ -424,6 +442,7 @@ export async function handleS3(req, res, { storage, lookupKey, region = 'us-east
     const { metadata, stream } = result;
     let range;
     try {
+      if (auth.anonymous && !await allowAnonymousRead(bucket, key)) fail('AccessDenied', 403, 'Anonymous access to this object is not allowed.');
       objectHeaders(res, metadata);
       if (header(req, 'x-amz-checksum-mode') === 'ENABLED' && metadata.sha256) res.setHeader('x-amz-checksum-sha256', Buffer.from(metadata.sha256, 'hex').toString('base64'));
       if (readPreconditions(req, metadata)) { stream?.destroy?.(); res.writeHead(304); res.end(); return; }

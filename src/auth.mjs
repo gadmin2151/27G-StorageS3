@@ -267,7 +267,7 @@ export class Auth {
     if (this.pendingMfa.size >= 1000 && !this.pendingMfa.has(user)) throw new ApiError(429, 'Слишком много ожидающих настроек MFA.');
     const secret = base32(randomBytes(20)), expires = Date.now() + 10 * 60_000;
     this.pendingMfa.set(user, { secret, expires, password: row.password });
-    return { secret, expiresAt: new Date(expires).toISOString(), otpauthUri: `otpauth://totp/${encodeURIComponent(`27g-StoregeS3:${user}`)}?secret=${secret}&issuer=27g-StoregeS3&algorithm=SHA1&digits=6&period=30` };
+    return { secret, expiresAt: new Date(expires).toISOString(), otpauthUri: `otpauth://totp/${encodeURIComponent(`27G-StorageS3:${user}`)}?secret=${secret}&issuer=27G-StorageS3&algorithm=SHA1&digits=6&period=30` };
   }
   confirmMfaEnrollment(user, { code }, ip) {
     this.throttle(`mfa:${ip}`); this.throttle(`mfa-account:${user}`);
@@ -395,6 +395,13 @@ export class Auth {
     this.db.prepare('DELETE FROM audit WHERE id <= (SELECT max(id) - 10000 FROM audit)').run();
   }
   events() { return this.db.prepare('SELECT at, action, detail FROM audit ORDER BY id DESC LIMIT 200').all(); }
+  eventPage({ page = 1, pageSize = 10 } = {}) {
+    if (!Number.isSafeInteger(page) || page < 1 || ![10, 25, 50].includes(pageSize)) throw new ApiError(400, 'Страница должна быть положительным числом, размер страницы — 10, 25 или 50.');
+    const total = this.db.prepare('SELECT COUNT(*) AS total FROM audit').get().total;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    page = Math.min(page, totalPages);
+    return { events: this.db.prepare('SELECT id, at, action, detail FROM audit ORDER BY id DESC LIMIT ? OFFSET ?').all(pageSize, (page - 1) * pageSize), total, page, pageSize, totalPages };
+  }
   preference(key, fallback) { const row = this.db.prepare('SELECT value FROM preferences WHERE key=?').get(key); return row ? JSON.parse(row.value) : fallback; }
   setPreference(key, value) { this.db.prepare('INSERT INTO preferences VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, JSON.stringify(value)); }
   close() { this.sessions.clear(); this.pendingMfa.clear(); this.db.close(); }

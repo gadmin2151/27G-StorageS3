@@ -1,10 +1,12 @@
 {
-  "name": "27g-storeges3",
-  "version": "0.2.0",
+  "name": "27g-storage-s3",
+  "version": "0.3.0",
   "private": true,
-  "description": "27g-StoregeS3 — object storage with a web console and replicated storage nodes",
+  "description": "27G-StorageS3 — object storage with a web console and replicated storage nodes",
   "type": "module",
-  "engines": { "node": ">=22.13.0" },
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "scripts": {
     "start": "node src/server.mjs",
     "node": "node src/node.mjs",
