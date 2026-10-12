@@ -39,9 +39,18 @@ jobs:
       - name: Download checksum-pinned etcd for real HA tests
         run: |
           mkdir -p "$RUNNER_TEMP/etcd"
-          curl --fail --silent --show-error --location --retry 3 --proto '=https' --tlsv1.2 \
-            https://github.com/etcd-io/etcd/releases/download/v3.6.5/etcd-v3.6.5-linux-amd64.tar.gz \
-            --output "$RUNNER_TEMP/etcd/archive.tar.gz"
+          # Both download hosts are documented in the official v3.6.5 release notes.
+          # A transient GitHub release-asset outage must not skip the HA suite.
+          downloaded=false
+          for base in https://github.com/etcd-io/etcd/releases/download https://storage.googleapis.com/etcd; do
+            if curl --fail --silent --show-error --location --retry 2 --connect-timeout 15 --max-time 180 \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              "$base/v3.6.5/etcd-v3.6.5-linux-amd64.tar.gz" --output "$RUNNER_TEMP/etcd/archive.tar.gz"; then
+              downloaded=true
+              break
+            fi
+          done
+          "$downloaded" || { echo 'Both official etcd download hosts failed.' >&2; exit 1; }
           echo '66bad39ed920f6fc15fd74adcb8bfd38ba9a6412f8c7852d09eb11670e88cac3  archive.tar.gz' | (cd "$RUNNER_TEMP/etcd" && sha256sum --check --strict)
           tar -xzf "$RUNNER_TEMP/etcd/archive.tar.gz" -C "$RUNNER_TEMP/etcd" --strip-components=1 etcd-v3.6.5-linux-amd64/etcd
           test -x "$RUNNER_TEMP/etcd/etcd"
@@ -116,7 +125,7 @@ jobs:
           cache-from: type=gha,scope=disk-agent
           cache-to: type=gha,mode=max,scope=disk-agent
       - name: Actual container auth, writes and persistence after restart
-        run: bash scripts/container-smoke.sh 27g-storage-s3:ci 27g-storage-s3-disk-agent:ci
+        run: sudo env "PATH=$PATH" bash scripts/container-smoke.sh 27g-storage-s3:ci 27g-storage-s3-disk-agent:ci
       - name: Installer and in-place update on the same data volume
         run: sudo env "PATH=$PATH" bash scripts/installer-smoke.sh
 
