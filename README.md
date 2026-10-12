@@ -189,7 +189,7 @@ node --test tests/*.test.mjs
 docker compose config --quiet
 ```
 
-Version 0.3.2 passed **135/135 local tests without skips**. HA tests need real etcd: set `ETCD_BINARY=/path/to/etcd`; without it some checks are skipped. The [0.3.1 release workflow](https://github.com/gadmin2151/27G-StorageS3/actions/runs/38247581785) verified containers, installation and updates using real Docker, and published images for both architectures. Functional checks do not replace load testing and auditing. Subsequent verification is recorded in [project context](docs/PROJECT_MEMORY.md).
+Version 0.3.2 passed **135/135 local tests without skips**. HA tests need real etcd: set `ETCD_BINARY=/path/to/etcd`; without it some checks are skipped. The [0.3.2 release workflow](https://github.com/gadmin2151/27G-StorageS3/actions/runs/38253509576) verified containers, installation and updates using real Docker, and published images for both architectures. Functional checks do not replace load testing and auditing. Subsequent verification is recorded in [project context](docs/PROJECT_MEMORY.md).
 
 To continue on another device, open the repository and start with `AGENTS.md` and `docs/PROJECT_MEMORY.md`. Git carries source code and project context; storage data and secrets are transferred separately.
 
