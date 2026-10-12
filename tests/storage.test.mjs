@@ -35,6 +35,8 @@ test('durable object restart, literal keys, checksum rejection and cache invalid
   assert.equal((await readdir(join(setupResult.dir, 'blobs'))).every(name => /^[a-f\d-]{36}$/.test(name)), true);
   await assert.rejects(storage.deleteBucket('test-bucket'), { code: 'BucketNotEmpty' });
   await storage.deleteObject('test-bucket', key); await assert.rejects(storage.headObject('test-bucket', key), { code: 'NoSuchKey' });
+  await assert.rejects(storage.deleteBucket('test-bucket'), { code: 'BucketNotEmpty' });
+  for (const version of (await storage.listObjectVersions('test-bucket')).versions) await storage.deleteObject('test-bucket', key, { versionId: version.versionId });
   await storage.deleteBucket('test-bucket'); assert.deepEqual(await storage.buckets(), []);
 });
 

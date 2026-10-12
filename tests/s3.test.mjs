@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { createHash, createHmac } from 'node:crypto';
 import { createServer, request } from 'node:http';
 import { Readable } from 'node:stream';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Storage } from '../src/storage.mjs';
 import { authenticateS3, handleS3 } from '../src/s3.mjs';
 
 const KEY = 'AKIAIOSFODNN7EXAMPLE';
@@ -86,9 +90,10 @@ class MemoryStorage {
   }
 }
 
-async function fixture(t, { role = 'readwrite', buckets, maxObjectBytes } = {}) {
-  const storage = new MemoryStorage();
-  const server = createServer((req, res) => handleS3(req, res, { storage, maxObjectBytes, lookupKey: async key => key === KEY ? { secretKey: SECRET, role, buckets } : null }));
+async function fixture(t, { role = 'readwrite', buckets, maxObjectBytes, persistent=false, permissions, prefixes, owner }  = {}) {
+  let storage;
+  if(persistent){const dir=await mkdtemp(join(tmpdir(),'27g-s3-'));storage=await new Storage({dataDir:dir}).init();t.after(async()=>{storage.close();await rm(dir,{recursive:true,force:true});});}else storage=new MemoryStorage();
+  const server = createServer((req, res) => handleS3(req, res, { storage, maxObjectBytes, lookupKey: async key => key === KEY ? { secretKey: SECRET, role, buckets, permissions, prefixes, owner } : null }));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   const port = server.address().port;
@@ -264,8 +269,7 @@ test('unsupported operations never silently act as normal object or bucket opera
   const { call } = await fixture(t);
   await call('PUT', '/example');
   for (const [method, path, headers = {}] of [
-    ['POST', '/example/object?uploads'], ['PUT', '/example/object?uploadId=123&partNumber=1'],
-    ['GET', '/example/object?versionId=123'], ['GET', '/example?acl'], ['PUT', '/example/object', { 'x-amz-copy-source': '/example/source' }],
+    ['GET', '/example?acl'], ['PUT', '/example/object', { 'x-amz-copy-source': '/example/source' }],
     ['PUT', '/example/object', { 'x-amz-acl': 'public-read' }], ['PUT', '/example/object', { 'x-amz-server-side-encryption': 'AES256' }],
     ['PUT', '/example/object', { 'x-amz-content-sha256': 'STREAMING-AWS4-HMAC-SHA256-PAYLOAD' }],
     ['PUT', '/example/object', { 'if-none-match': '*' }], ['PUT', '/example/object', { 'x-amz-meta-custom': 'value' }],
@@ -291,4 +295,34 @@ test('location configuration is validated and dangerous XML is rejected', async 
   assert.equal((await call('GET', '/example?location')).status, 200);
   assert.equal((await call('PUT', '/another', config.replace('us-east-1', 'eu-west-1'))).status, 400);
   assert.equal((await call('PUT', '/another', '<!DOCTYPE x [<!ENTITY a SYSTEM "file:///etc/passwd">]><x>&a;</x>')).status, 400);
+});
+
+test('real S3 multipart cycle exposes retained versions and signed historical reads',async t=>{
+  const {call,storage}=await fixture(t,{persistent:true,owner:'alice'});await call('PUT','/example');
+  const initiated=await call('POST','/example/photo?uploads');assert.equal(initiated.status,200,initiated.body);const id=/<UploadId>([^<]+)<\/UploadId>/.exec(initiated.body)[1];
+  assert.match((await call('GET','/example?uploads')).body,new RegExp(id));
+  const p1=await call('PUT',`/example/photo?partNumber=1&uploadId=${id}`,Buffer.alloc(5*1024**2,97));assert.equal(p1.status,200,p1.body);
+  const p2=await call('PUT',`/example/photo?partNumber=2&uploadId=${id}`,'end');assert.equal(p2.status,200,p2.body);
+  const parts=await call('GET',`/example/photo?uploadId=${id}&max-parts=1`);assert.match(parts.body,/<IsTruncated>true<\/IsTruncated>/);assert.match(parts.body,/<NextPartNumberMarker>1<\/NextPartNumberMarker>/);
+  const xml=`<CompleteMultipartUpload><Part><ETag>${p1.headers.etag}</ETag><PartNumber>1</PartNumber></Part><Part><PartNumber>2</PartNumber><ETag>${p2.headers.etag}</ETag></Part></CompleteMultipartUpload>`;
+  const completed=await call('POST',`/example/photo?uploadId=${id}`,xml);assert.equal(completed.status,200,completed.body);assert.match(completed.body,/-2&quot;<\/ETag>/);const initialVersion=completed.headers['x-amz-version-id'];assert.ok(initialVersion);
+  const overwritten=await call('PUT','/example/photo','new');assert.equal(overwritten.status,200);assert.notEqual(overwritten.headers['x-amz-version-id'],initialVersion);
+  const historical=await call('GET',`/example/photo?versionId=${initialVersion}`,'',{headers:{range:'bytes=5242880-'}});assert.equal(historical.status,206);assert.equal(historical.body,'end');
+  const deleted=await call('DELETE','/example/photo');assert.equal(deleted.headers['x-amz-delete-marker'],'true');const missing=await call('GET','/example/photo');assert.equal(missing.status,404);assert.equal(missing.headers['x-amz-delete-marker'],'true');
+  assert.equal((await call('GET',`/example/photo?versionId=${deleted.headers['x-amz-version-id']}`)).status,405);
+  const versions=await call('GET','/example?versions&max-keys=1');assert.equal(versions.status,200,versions.body);assert.match(versions.body,/<DeleteMarker>/);assert.match(versions.body,/<IsTruncated>true<\/IsTruncated>/);
+  await call('DELETE',`/example/photo?versionId=${deleted.headers['x-amz-version-id']}`);assert.equal((await call('GET','/example/photo')).body,'new');
+  assert.equal(storage.ownerUsage('alice').objects,2);
+});
+
+test('multipart errors, strict XML and prefix/action scopes cannot fall through to object operations',async t=>{
+  const {call,storage}=await fixture(t,{persistent:true,owner:'alice',permissions:['read','list','write'],prefixes:['allowed/']});await storage.createBucket('example');
+  assert.equal((await call('PUT','/example/forbidden','x')).status,403);assert.equal((await call('GET','/example?versions')).status,403);assert.equal((await call('GET','/example?uploads&prefix=allowed%2F')).status,200);
+  const init=await call('POST','/example/allowed/file?uploads'),id=/<UploadId>([^<]+)<\/UploadId>/.exec(init.body)[1];
+  assert.equal((await call('PUT',`/example/allowed/file?uploadId=${id}&partNumber=0`,'x')).status,400);
+  assert.equal((await call('PUT',`/example/allowed/file?uploadId=${id}&partNumber=1`,'x',{headers:{'x-amz-content-sha256':'0'.repeat(64)}})).status,400);
+  const part=await call('PUT',`/example/allowed/file?uploadId=${id}&partNumber=1`,'x');assert.equal(part.status,200);
+  for(const xml of ['<!DOCTYPE x [<!ENTITY e SYSTEM "file:///etc/passwd">]><CompleteMultipartUpload>&e;</CompleteMultipartUpload>','<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>no</ETag></Part></CompleteMultipartUpload>'])assert.equal((await call('POST',`/example/allowed/file?uploadId=${id}`,xml)).status,400);
+  assert.equal((await call('GET','/example/allowed/file')).status,404);assert.equal((await call('DELETE','/example/allowed/file')).status,403);assert.equal((await call('DELETE',`/example/allowed/file?uploadId=${id}`)).status,204);assert.equal((await call('GET',`/example/allowed/file?uploadId=${id}`)).status,404);
+  assert.equal(storage.bucketUsage('example').bytes,0);
 });

@@ -38,7 +38,10 @@ function signedHeaders(endpoint, method, path, key, body = '') {
   const date = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
   const hash = sha256(body), host = new URL(endpoint).host;
   const names = 'host;x-amz-content-sha256;x-amz-date';
-  const canonical = `${method}\n${path}\n\nhost:${host}\nx-amz-content-sha256:${hash}\nx-amz-date:${date}\n\n${names}\n${hash}`;
+  const [pathname, query = ''] = path.split('?');
+  const encode = value => encodeURIComponent(value).replace(/[!'()*]/g, value => `%${value.charCodeAt(0).toString(16).toUpperCase()}`);
+  const parameters = [...new URLSearchParams(query)].map(([key, value]) => [encode(key), encode(value)]).sort(([a, av], [b, bv]) => a < b ? -1 : a > b ? 1 : av < bv ? -1 : av > bv ? 1 : 0).map(([key, value]) => `${key}=${value}`).join('&');
+  const canonical = `${method}\n${pathname}\n${parameters}\nhost:${host}\nx-amz-content-sha256:${hash}\nx-amz-date:${date}\n\n${names}\n${hash}`;
   const scope = `${date.slice(0, 8)}/us-east-1/s3/aws4_request`;
   const signingKey = hmac(hmac(hmac(hmac(`AWS4${key.secretKey}`, date.slice(0, 8)), 'us-east-1'), 's3'), 'aws4_request');
   const signature = hmac(signingKey, `AWS4-HMAC-SHA256\n${date}\n${scope}\n${sha256(canonical)}`).toString('hex');
@@ -220,10 +223,62 @@ test('overwriting or deleting an object invalidates previous shares even when th
   const removed = await f.share();
   assert.equal((await f.api('/object?bucket=photos&key=photo.png', 'DELETE')).status, 200);
   assert.equal((await f.anonymous(removed.path)).status, 404);
+  assert.equal((await f.api('/buckets/photos', 'DELETE')).status, 409, 'retained versions keep the bucket nonempty');
+  assert.equal((await f.api('/trash/purge', 'POST', { bucket: 'photos', key: 'photo.png' })).status, 200);
   assert.equal((await f.api('/buckets/photos', 'DELETE')).status, 200);
   assert.equal((await f.api('/buckets', 'POST', { name: 'photos' })).status, 201);
   await f.upload();
   assert.equal((await f.anonymous(removed.path)).status, 404, 'recreating the same bucket/key must not revive an old URL');
+});
+
+test('S3 promotion of an old version or removal of a delete marker never revives a previous share', async t => {
+  const f = await fixture(t);
+  const account = f.app.auth.createKey({ label: 'versions-share-test', role: 'readwrite', buckets: [] });
+  async function removeVersion(versionId) {
+    const path = `/photos/photo.png?versionId=${encodeURIComponent(versionId)}`;
+    const response = await f.anonymous(path, 'DELETE', { headers: signedHeaders(f.endpoint, 'DELETE', path, account) });
+    assert.equal(response.status, 204, response.text);
+  }
+  const original = await f.share(), firstGeneration = f.app.storage.objectGeneration('photos', 'photo.png');
+  const newer = await f.upload('photo.png', Buffer.from('newer'));
+  const replaced = await f.share();
+  await removeVersion(newer.versionId);
+  assert.deepEqual((await f.api('/object?bucket=photos&key=photo.png')).bytes, photo);
+  assert.notEqual(f.app.storage.objectGeneration('photos', 'photo.png'), firstGeneration);
+  for (const old of [original, replaced]) for (const method of ['GET', 'HEAD']) assert.equal((await f.anonymous(old.path, method)).status, 404);
+  const promoted = await f.share(), generation = f.app.storage.objectGeneration('photos', 'photo.png');
+  await f.api('/object?bucket=photos&key=photo.png', 'DELETE');
+  const versions = (await f.api('/versions?bucket=photos&key=photo.png')).json().versions;
+  const marker = versions.find(version => version.isDeleteMarker);
+  assert.ok(marker);
+  await removeVersion(marker.versionId);
+  assert.notEqual(f.app.storage.objectGeneration('photos', 'photo.png'), generation);
+  assert.equal((await f.anonymous(promoted.path)).status, 404);
+  assert.deepEqual((await f.api('/shares?bucket=photos&key=photo.png')).json().shares, []);
+  const live = await f.share();
+  await f.restart();
+  assert.deepEqual((await f.anonymous(live.path)).bytes, photo);
+  for (const old of [original, replaced, promoted]) assert.equal((await f.anonymous(old.path)).status, 404);
+  // Removing an unrelated historical version leaves the current generation intact.
+  const previous = (await f.api('/versions?bucket=photos&key=photo.png')).json().versions[0];
+  await f.upload(); const current = await f.share();
+  await removeVersion(previous.versionId);
+  assert.deepEqual((await f.anonymous(current.path)).bytes, photo);
+});
+
+test('upgrading a legacy catalog preserves live shares and invalidates them after a version promotion', async t => {
+  const f = await fixture(t), link = await f.share();
+  const blob = f.app.storage.db.prepare('SELECT blob_id FROM objects WHERE bucket=? AND key=?').get('photos', 'photo.png').blob_id;
+  // Reconstruct the pre-generation schema and its existing share binding.
+  f.app.storage.db.exec('ALTER TABLE objects DROP COLUMN generation');
+  f.app.shares.db.prepare('UPDATE shares SET blob_id=? WHERE id=?').run(blob, link.id);
+  await f.restart();
+  assert.equal(f.app.storage.objectGeneration('photos', 'photo.png'), blob);
+  assert.deepEqual((await f.anonymous(link.path)).bytes, photo);
+  const newer = await f.upload('photo.png', Buffer.from('replacement'));
+  await f.app.storage.deleteObject('photos', 'photo.png', { versionId: newer.versionId });
+  assert.equal((await f.anonymous(link.path)).status, 404);
+  assert.notEqual(f.app.storage.objectGeneration('photos', 'photo.png'), blob);
 });
 
 test('share URLs use the configured public origin and ignore proxy origin spoofing', async t => {

@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { readFile, mkdir, open, unlink, realpath, link } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, open, unlink, realpath, link } from 'node:fs/promises';
 import { randomUUID, createHash } from 'node:crypto';
 import { isIP, createServer as createNetServer } from 'node:net';
 import { join, dirname, resolve } from 'node:path';
@@ -9,14 +9,20 @@ import { Storage } from './storage.mjs';
 import { handleS3 } from './s3.mjs';
 import { Auth, ApiError } from './auth.mjs';
 import { Shares } from './shares.mjs';
+import { featureAPI } from './admin-features.mjs';
+import { Monitor } from './monitor.mjs';
+import { normalizePublicOrigin, normalizeCorsOrigins, applyS3Cors } from './service-settings.mjs';
+import { HaCoordinator } from './ha.mjs';
+import { CommitResponse } from './ha-response.mjs';
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../web');
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const mutations = new Set(['POST', 'PUT', 'DELETE', 'PATCH']);
 const staticFiles = new Map([
   ['/console', ['index.html', 'text/html; charset=utf-8']],
   ['/console/', ['index.html', 'text/html; charset=utf-8']],
   ['/console/app.js', ['app.js', 'text/javascript; charset=utf-8']],
+  ['/console/features.js', ['features.js', 'text/javascript; charset=utf-8']],
   ['/console/style.css', ['style.css', 'text/css; charset=utf-8']],
   ['/console/storage-mark.svg', ['storage-mark.svg', 'image/svg+xml']],
 ]);
@@ -104,10 +110,11 @@ export async function createApp(options = {}) {
   try { releaseFile = await acquireLock(canonicalDir); }
   catch (error) { await releaseLease(); throw error; }
   const releaseLock = async () => { await releaseFile(); await releaseLease(); };
-  const publicOrigin = options.publicOrigin ?? process.env.PUBLIC_ORIGIN ?? '';
+  let publicOrigin = options.publicOrigin ?? process.env.PUBLIC_ORIGIN ?? '';
   if (publicOrigin && !/^https?:\/\/[^/]+$/.test(publicOrigin)) { await releaseLock(); throw new Error('PUBLIC_ORIGIN must be an http(s) origin, without a trailing slash'); }
-  const secureCookies = publicOrigin.startsWith('https://');
-  let auth, storage, shares;
+  let secureCookies = publicOrigin.startsWith('https://');
+  let auth, storage, shares, ha;
+  const haOptions = options.ha || (process.env.HA_ETCD_ENDPOINTS ? { endpoints: process.env.HA_ETCD_ENDPOINTS.split(','), nodeId: process.env.HA_NODE_ID, role: process.env.HA_ROLE || 'slave', clusterId: process.env.HA_CLUSTER_ID || 'storeges3' } : null);
   try {
     const maxObjectBytes = int(options.maxObjectBytes ?? process.env.MAX_OBJECT_BYTES, 5 * 1024 ** 3, 1, 5 * 1024 ** 3, 'MAX_OBJECT_BYTES');
     storage = new Storage({ dataDir, maxObjectBytes,
@@ -116,9 +123,43 @@ export async function createApp(options = {}) {
       queueLimit: int(options.queueLimit ?? process.env.QUEUE_LIMIT, 32, 1, 1024, 'QUEUE_LIMIT'),
     });
     await storage.init();
+    if (haOptions && process.env.HA_ETCD_CA_FILE) {
+      haOptions.tls = { ca: await readFile(process.env.HA_ETCD_CA_FILE), ...(process.env.HA_ETCD_CERT_FILE ? { cert: await readFile(process.env.HA_ETCD_CERT_FILE) } : {}), ...(process.env.HA_ETCD_KEY_FILE ? { key: await readFile(process.env.HA_ETCD_KEY_FILE) } : {}) };
+    }
+    if (haOptions && process.env.HA_SETUP_TOKEN_FILE && options.setupToken === undefined) options.setupToken = (await readFile(process.env.HA_SETUP_TOKEN_FILE, 'utf8')).trim();
+    if (haOptions && process.env.HA_MASTER_KEY_FILE) {
+      const sharedKey = await readFile(process.env.HA_MASTER_KEY_FILE);
+      if (sharedKey.length !== 32) throw new Error('HA_MASTER_KEY_FILE must contain exactly 32 bytes');
+      try { const current = await readFile(join(dataDir, 'master.key')); if (!current.equals(sharedKey)) throw new Error('Existing master.key differs from HA key; migrate secrets before enabling HA'); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; await writeFile(join(dataDir, 'master.key'), sharedKey, { flag: 'wx', mode: 0o600, flush: true }); }
+    }
     auth = new Auth({ dataDir, secureCookies, setupToken: options.setupToken ?? process.env.SETUP_TOKEN });
     await auth.initializeDefaults();
     shares = new Shares({ dataDir });
+    const monitor = new Monitor(auth);
+    let scrubIntervalSeconds = auth.preference('scrubIntervalSeconds', 900);
+    let lastScrub = auth.preference('lastScrubAt', null);
+    storage.quotaPolicy = username => username ? auth.userPolicy(username) : {};
+    function refreshPreferences() {
+      publicOrigin = normalizePublicOrigin(process.env.PUBLIC_ORIGIN_OVERRIDE ?? auth.preference('publicOrigin', options.publicOrigin ?? process.env.PUBLIC_ORIGIN ?? ''));
+      scrubIntervalSeconds = auth.preference('scrubIntervalSeconds', 900); lastScrub = auth.preference('lastScrubAt', null);
+      secureCookies = publicOrigin.startsWith('https://'); auth.secureCookies = secureCookies;
+    }
+    refreshPreferences();
+    if (haOptions) {
+      storage.requireRemoteMirrors = true; storage.garbageCollectionEnabled = false;
+      ha = new HaCoordinator({ ...haOptions, dataDir, encryptionKey: auth.masterKey,
+        exportState: () => ({ storage: storage.exportState(), auth: auth.exportState(), shares: shares.exportState() }),
+        importState: async state => { await storage.importState(state.storage); auth.importState(state.auth); shares.importState(state.shares); refreshPreferences(); },
+        validateState: state => {
+          const topology = JSON.parse(state.storage.tables.settings.find(row => row.key === 'topology').value);
+          const hasData = state.storage.tables.object_versions.length || state.storage.tables.multipart_uploads.length;
+          if (hasData && (topology.mode === 'raid0' || topology.nodes.some(node => node.url === 'local'))) throw new ApiError(503, 'До включения HA перенесите данные на зеркальные HTTP-узлы.');
+        },
+      });
+      await ha.start();
+    }
+    const guarded = (write, work) => ha ? ha.run({ write }, work) : work();
     const started = Date.now();
     const trustedProxyIPs = (options.trustedProxyIPs ?? process.env.TRUSTED_PROXY_IPS ?? '').split(',').map(value => value.trim()).filter(Boolean);
     if (trustedProxyIPs.some(ip => !isIP(ip))) throw new Error('TRUSTED_PROXY_IPS must be a comma-separated list of exact IP addresses');
@@ -140,17 +181,16 @@ export async function createApp(options = {}) {
     }
     let maintenance = null;
     let background = null;
-    let scrubIntervalSeconds = auth.preference('scrubIntervalSeconds', 900);
-    let lastScrub = null;
     const maintenanceTimer = setInterval(() => {
-      if (!scrubIntervalSeconds || maintenance || Date.now() < (lastScrub ?? started) + scrubIntervalSeconds * 1000) return;
+      if ((ha && !ha.isLeader) || !scrubIntervalSeconds || maintenance || Date.now() < (lastScrub ?? started) + scrubIntervalSeconds * 1000) return;
       maintenance = { action: 'automatic-scrub', startedAt: new Date().toISOString() };
-      background = storage.scrub().then(result => auth.audit('cluster.automatic_scrub', JSON.stringify(result)))
+      background = guarded(true, async () => { const result = await storage.scrub(); auth.setPreference('lastScrubResult', result); auth.setPreference('lastScrubAt', Date.now()); auth.audit('cluster.automatic_scrub', JSON.stringify(result)); })
         .catch(error => { console.error(JSON.stringify({ event: 'automatic_scrub.failed', code: error.code || 'InternalError' })); })
         .finally(() => { maintenance = null; background = null; lastScrub = Date.now(); });
     }, 30_000);
     maintenanceTimer.unref();
     async function admin(req, res, url) {
+      refreshPreferences();
       const path = url.pathname, method = req.method, mutation = mutations.has(method);
       if (mutation) {
         const origin = req.headers.origin;
@@ -161,27 +201,31 @@ export async function createApp(options = {}) {
       if (path === '/api/session' && method === 'GET') {
         const session = auth.session(req);
         return json(res, 200, { authenticated: !!session, defaultCredentials: auth.defaultCredentials,
-          setupTokenRequired: auth.defaultCredentials && !localDefaultLogin(req), ...(session ? { csrf: session.csrf, user: session.user } : {}) });
+          setupTokenRequired: auth.defaultCredentials && !localDefaultLogin(req), ...(session ? { csrf: session.csrf, user: session.user, role: session.role } : {}) });
       }
       if (path === '/api/login' && method === 'POST') {
         const session = await auth.login(await bodyJSON(req), clientIP(req), { allowDefaultWithoutToken: localDefaultLogin(req) });
         res.setHeader('Set-Cookie', auth.cookie(session.token));
-        return json(res, 200, { user: session.user, csrf: session.csrf, defaultCredentials: auth.defaultCredentials });
+        return json(res, 200, { user: session.user, csrf: session.csrf, role: session.role, defaultCredentials: auth.defaultCredentials });
       }
       const session = auth.requireSession(req, mutation);
+      const personal = ['/api/logout', '/api/password', '/api/mfa/enroll', '/api/mfa/confirm', '/api/mfa/disable'];
+      if (mutation && session.role === 'viewer' && !personal.includes(path)) throw new ApiError(403, 'Роль наблюдателя разрешает только чтение.');
+      if (mutation && session.role !== 'admin' && ['/api/settings', '/api/topology', '/api/scrub'].includes(path)) throw new ApiError(403, 'Это действие доступно только администратору.');
+      if (await featureAPI(req, res, url, { auth, storage, session, json: (...args) => { json(...args); return true; }, bodyJSON, clientIP, monitor, getHa: () => ha, publicOrigin })) return;
       if (path === '/api/logout' && method === 'POST') {
         auth.logout(req); res.setHeader('Set-Cookie', auth.cookie('', true)); return json(res, 200, { ok: true });
       }
       if (path === '/api/password' && method === 'PUT') {
         const updated = await auth.changePassword(session.user, await bodyJSON(req), clientIP(req));
         res.setHeader('Set-Cookie', auth.cookie(updated.token));
-        return json(res, 200, { user: updated.user, csrf: updated.csrf, defaultCredentials: auth.defaultCredentials });
+        return json(res, 200, { user: updated.user, csrf: updated.csrf, role: updated.role, defaultCredentials: auth.defaultCredentials });
       }
       if (path === '/api/status' && method === 'GET') {
         return json(res, 200, { ...await storage.status(), uptime: Math.floor((Date.now() - started) / 1000), version: VERSION,
-          endpoint: publicOrigin || `http://${req.headers.host}`, security: { secureCookies, defaultCredentials: auth.defaultCredentials }, maintenance,
+          endpoint: publicOrigin || `http://${req.headers.host}`, security: { secureCookies, defaultCredentials: auth.defaultCredentials }, maintenance, ha: ha?.status() || { enabled: false }, singleCoordinator: !ha,
           automaticRepair: { intervalSeconds: scrubIntervalSeconds, lastRun: lastScrub ? new Date(lastScrub).toISOString() : null, nextRun: scrubIntervalSeconds ? new Date((lastScrub ?? started) + scrubIntervalSeconds * 1000).toISOString() : null },
-          limitations: ['Один координатор: автоматического failover метаданных пока нет.', 'S3: базовые операции; multipart, versioning и IAM policy пока не поддерживаются.', 'Экспериментальная версия: нагрузочные испытания и независимый аудит ещё не проведены.'] });
+          limitations: [ha ? 'HA master/slave: нужен quorum etcd; физическая очистка старых blobs отключена.' : 'Одиночный координатор: для failover включите HA master/slave с арбитром.', 'S3: multipart и последние 5 версий; AWS IAM, streaming signatures и trailers не поддерживаются.', 'Экспериментальная версия: нагрузочные испытания и независимый аудит ещё не проведены.'] });
       }
       if (path === '/api/buckets') {
         if (method === 'GET') return json(res, 200, { buckets: await storage.buckets() });
@@ -206,11 +250,11 @@ export async function createApp(options = {}) {
         if (!bucket || !key) throw new ApiError(400, 'Укажите бакет и ключ объекта.');
         if (method === 'PUT') {
           if (Number(req.headers['content-length']) > maxObjectBytes) throw new ApiError(413, 'Объект превышает лимит размера.');
-          const metadata = await storage.putObject(bucket, key, req, { contentType: req.headers['content-type'] || 'application/octet-stream' });
+          const metadata = await storage.putObject(bucket, key, req, { contentType: req.headers['content-type'] || 'application/octet-stream', owner: session.user });
           auth.audit('object.uploaded', `${bucket}/${key}`); return json(res, 200, metadata);
         }
         if (method === 'GET') {
-          const { metadata, stream } = await storage.getObject(bucket, key);
+          const { metadata, stream } = await storage.getObject(bucket, key, { versionId: url.searchParams.get('versionId') || undefined });
           const filename = key.split('/').pop().replace(/[\r\n]/g, '_');
           // Always download user content: never execute uploaded HTML/SVG on the console origin.
           res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': metadata.size,
@@ -255,32 +299,35 @@ export async function createApp(options = {}) {
         if (maintenance) throw new ApiError(409, 'Дождитесь завершения текущей операции.');
         maintenance = { action: 'scrub', startedAt: new Date().toISOString() };
         try {
-          const result = await storage.scrub(); auth.audit('cluster.scrub', JSON.stringify(result));
+          const result = await storage.scrub(); auth.setPreference('lastScrubResult', result); auth.setPreference('lastScrubAt', Date.now()); auth.audit('cluster.scrub', JSON.stringify(result));
           return json(res, 200, result);
         } finally { maintenance = null; lastScrub = Date.now(); }
       }
       if (path === '/api/keys') {
-        if (method === 'GET') return json(res, 200, { keys: auth.listKeys() });
-        if (method === 'POST') return json(res, 201, auth.createKey(await bodyJSON(req)));
+        if (method === 'GET') return json(res, 200, { keys: auth.listKeys(session.role === 'admin' ? undefined : session.user) });
+        if (method === 'POST') { const input = await bodyJSON(req); return json(res, 201, auth.createKey(input, { owner: session.role === 'admin' ? input.owner || session.user : session.user })); }
       }
       if (path.startsWith('/api/keys/') && method === 'DELETE') {
-        auth.revokeKey(decodeURIComponent(path.slice('/api/keys/'.length))); return json(res, 200, { ok: true });
+        auth.revokeKey(decodeURIComponent(path.slice('/api/keys/'.length)), session.role === 'admin' ? undefined : session.user); return json(res, 200, { ok: true });
       }
       if (path === '/api/settings') {
         if (method === 'GET') {
           const status = await storage.status();
-          return json(res, 200, { cacheBytes: status.cache.limit, concurrency: status.queue.concurrency, queueLimit: status.queue.limit, maxObjectBytes, scrubIntervalSeconds });
+          return json(res, 200, { cacheBytes: status.cache.limit, concurrency: status.queue.concurrency, queueLimit: status.queue.limit, maxObjectBytes, scrubIntervalSeconds, publicOrigin, corsOrigins: auth.preference('corsOrigins', []) });
         }
         if (method === 'PUT') {
           const values = await bodyJSON(req);
+          const nextOrigin = values.publicOrigin === undefined ? publicOrigin : normalizePublicOrigin(values.publicOrigin);
+          const nextCors = values.corsOrigins === undefined ? auth.preference('corsOrigins', []) : normalizeCorsOrigins(values.corsOrigins);
           const interval = values.scrubIntervalSeconds ?? scrubIntervalSeconds;
           if (!Number.isInteger(interval) || (interval !== 0 && (interval < 60 || interval > 86400))) throw new ApiError(400, 'Интервал проверки: 0 (выключено) или 60–86400 секунд.');
           await storage.updateSettings({ cacheBytes: values.cacheBytes, concurrency: values.concurrency });
           scrubIntervalSeconds = interval; auth.setPreference('scrubIntervalSeconds', interval);
-          auth.audit('settings.updated', JSON.stringify(values)); return json(res, 200, { ok: true });
+          auth.setPreference('publicOrigin', nextOrigin); auth.setPreference('corsOrigins', nextCors); refreshPreferences();
+          auth.audit('settings.updated', JSON.stringify({ publicOrigin: nextOrigin, corsOrigins: nextCors, interval })); return json(res, 200, { ok: true });
         }
       }
-      if (path === '/api/audit' && method === 'GET') return json(res, 200, { events: auth.events() });
+      if (path === '/api/audit' && method === 'GET') { if (session.role !== 'admin') throw new ApiError(403, 'Журнал доступен администратору.'); return json(res, 200, { events: auth.events() }); }
       throw new ApiError(404, 'Метод API не найден.');
     }
     async function publicShare(req, res, rawPath) {
@@ -299,7 +346,7 @@ export async function createApp(options = {}) {
       if (!share) throw unavailable();
       let result;
       try {
-        const options = { expectedBlobId: share.blob_id };
+        const options = { expectedGeneration: share.blob_id };
         result = req.method === 'HEAD'
           ? { metadata: await storage.headObject(share.bucket, share.object_key, options) }
           : await storage.getObject(share.bucket, share.object_key, options);
@@ -322,16 +369,20 @@ export async function createApp(options = {}) {
       await pipeline(stream, res);
     }
     const server = http.createServer({ maxHeaderSize: 16 * 1024, requestTimeout: 15 * 60_000, headersTimeout: 15_000, keepAliveTimeout: 5000 }, async (req, res) => {
+      const requestStarted = performance.now(); res.once('finish', () => monitor.record(res.statusCode, performance.now() - requestStarted));
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('X-Frame-Options', 'DENY');
       res.setHeader('Referrer-Policy', 'no-referrer');
       res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
       if (secureCookies) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
+      const originalResponse = res;
+      const dispatch = async () => {
       try {
         if (!req.url?.startsWith('/')) throw new ApiError(400, 'Invalid request target');
         // URL.pathname normalizes dot segments, but dots are literal S3 object-key bytes.
         const rawPath = req.url.split('?', 1)[0];
-        if (rawPath === '/healthz' && req.method === 'GET') return json(res, 200, { status: 'ok' });
+        if (rawPath === '/healthz' && req.method === 'GET') return json(res, 200, { status: 'ok', ha: !!ha });
+        if (rawPath === '/ha/ready' && req.method === 'GET' && !req.headers.authorization && !new URL(req.url, 'http://localhost').searchParams.has('X-Amz-Algorithm')) return json(res, ha && !ha.isLeader ? 503 : 200, { ready: !ha || ha.isLeader });
         // Preserve authenticated S3 access to buckets named "share" created by
         // older versions. New bucket creation reserves this name in Storage.
         if (rawPath.startsWith('/share/') && !req.headers.authorization && !new URL(req.url, 'http://localhost').searchParams.has('X-Amz-Algorithm'))
@@ -347,13 +398,36 @@ export async function createApp(options = {}) {
         }
         // Apply download isolation to S3 payloads too; S3 requests never use browser admin cookies.
         res.setHeader('Content-Disposition', 'attachment');
-        await handleS3(req, res, { storage, lookupKey: key => auth.lookupKey(key), region: process.env.S3_REGION || 'us-east-1', maxObjectBytes });
+        if (applyS3Cors(req, res, auth.preference('corsOrigins', []))) return;
+        await handleS3(req, res, { storage, lookupKey: key => auth.lookupKey(key), region: process.env.S3_REGION || 'us-east-1', maxObjectBytes, publicOrigin });
       } catch (err) {
         if (res.destroyed) return;
         if (res.headersSent) { res.destroy(); return; }
         const status = err.status || err.statusCode || 500;
         if (status >= 500) console.error(JSON.stringify({ event: 'request.failed', code: err.code || 'InternalError', message: err.message }));
-        json(res, status, { error: status >= 500 ? 'Операция не выполнена. Проверьте состояние узлов и журнал сервера.' : err.message });
+        json(res, status, { error: status >= 500 ? 'Операция не выполнена. Проверьте состояние узлов и журнал сервера.' : err.message, code: err.code });
+      }
+      };
+      try {
+        const rawPath = req.url?.split('?', 1)[0];
+        if (ha && rawPath === '/api/ha/role' && req.method === 'PUT') {
+          const role = await guarded(false, async () => {
+            refreshPreferences();
+            if (req.headers.origin && req.headers.origin !== (publicOrigin || `http://${req.headers.host}`) || req.headers['sec-fetch-site'] === 'cross-site') throw new ApiError(403, 'Запрос с другого сайта запрещён.');
+            const session = auth.requireSession(req, true); if (session.role !== 'admin') throw new ApiError(403, 'Нужен администратор.');
+            return (await bodyJSON(req)).role;
+          });
+          await ha.setRole(role); return json(res, 200, ha.status());
+        }
+        const bypass = req.method === 'GET' && (rawPath === '/healthz' || rawPath === '/ha/ready' && !req.headers.authorization && !new URL(req.url, 'http://localhost').searchParams.has('X-Amz-Algorithm')) || ['GET', 'HEAD'].includes(req.method) && staticFiles.has(rawPath) || rawPath === '/' && req.method === 'GET' && (req.headers.accept || '').includes('text/html') && !req.headers.authorization && !new URL(req.url, 'http://localhost').searchParams.has('X-Amz-Algorithm');
+        if (!ha || bypass) await dispatch();
+        else if (mutations.has(req.method)) {
+          const held = new CommitResponse(originalResponse); res = held;
+          await guarded(true, dispatch); held.flush();
+        } else await guarded(false, dispatch);
+      } catch (error) {
+        if (!originalResponse.headersSent) json(originalResponse, error.status || 503, { error: error.status && error.status < 500 ? error.message : 'Координатор недоступен или нет кворума. Повторите запрос через общий адрес сервиса.' });
+        else originalResponse.destroy();
       }
     });
     server.maxConnections = 256;
@@ -365,10 +439,11 @@ export async function createApp(options = {}) {
         server.close(err => err ? reject(err) : done()); server.closeIdleConnections();
       });
       if (background) await background;
-      await storage.close(); auth.close(); shares.close(); await releaseLock();
+      await ha?.close(); await storage.close(); auth.close(); shares.close(); await releaseLock();
     }
-    return { server, storage, auth, shares, close };
+    return { server, storage, auth, shares, ha, monitor, close };
   } catch (err) {
+    try { await ha?.close(); } catch {}
     try { await storage?.close(); } catch {}
     try { auth?.close(); } catch {}
     try { shares?.close(); } catch {}

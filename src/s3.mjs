@@ -129,19 +129,49 @@ export async function authenticateS3(req, { lookupKey, region = 'us-east-1', now
 
 function requireSupportedRequest(req, auth, bucket, key) {
   const allowed = new Set(['x-id', ...(auth.presigned ? [...PRESIGN_PARAMS, ...HOISTED_HEADERS] : [])]);
-  if (bucket && !key && req.method === 'GET') for (const name of LIST_PARAMS) allowed.add(name);
-  if (bucket && !key && req.method === 'GET') allowed.add('location');
+  if (bucket && !key && req.method === 'GET') for (const name of [...LIST_PARAMS,'location','versioning','versions','key-marker','version-id-marker','uploads','upload-id-marker','max-uploads']) allowed.add(name);
+  if(bucket&&key)for(const name of ['uploadId','partNumber','uploads','part-number-marker','max-parts','versionId'])allowed.add(name);
   for (const name of auth.query.keys()) if (!allowed.has(name)) unsupported(`The ${name} query operation is not implemented.`);
-  for (const name of Object.keys(req.headers)) {
-    if (name.startsWith('x-amz-') && !SUPPORTED_AMZ_HEADERS.has(name)) unsupported(`The ${name} feature is not implemented.`);
-  }
+  for (const name of Object.keys(req.headers)) if (name.startsWith('x-amz-') && !SUPPORTED_AMZ_HEADERS.has(name)) unsupported(`The ${name} feature is not implemented.`);
   if (header(req, 'x-amz-checksum-mode') && (!['GET', 'HEAD'].includes(req.method) || header(req, 'x-amz-checksum-mode') !== 'ENABLED')) unsupported('Only ENABLED checksum mode on GET and HEAD is supported.');
   if (header(req, 'if-modified-since') || header(req, 'if-unmodified-since') || header(req, 'if-range')) unsupported('Date and If-Range preconditions are not implemented.');
-  if (['PUT', 'DELETE'].includes(req.method) && (header(req, 'if-match') || header(req, 'if-none-match'))) unsupported('Conditional writes require atomic storage preconditions and are not yet implemented.');
-  if (req.method === 'PUT') {
-    for (const name of ['cache-control', 'content-disposition', 'content-encoding', 'content-language', 'expires']) if (header(req, name)) unsupported(`Persisting the ${name} object attribute is not implemented.`);
+  if (['PUT', 'POST', 'DELETE'].includes(req.method) && (header(req, 'if-match') || header(req, 'if-none-match'))) unsupported('Conditional writes require atomic storage preconditions and are not yet implemented.');
+  if (req.method === 'PUT' || req.method === 'POST') for (const name of ['cache-control', 'content-disposition', 'content-encoding', 'content-language', 'expires']) if (header(req, name)) unsupported(`Persisting the ${name} object attribute is not implemented.`);
+  if (!['GET', 'HEAD', 'PUT', 'DELETE','POST'].includes(req.method)) unsupported(`The ${req.method} operation is not implemented.`);
+  const q=auth.query;
+  if(key){
+    if(q.has('versionId')&&(!['GET','HEAD','DELETE'].includes(req.method)||q.has('uploads')||q.has('uploadId')||q.has('partNumber')))fail('InvalidRequest',400,'versionId is supported only for object GET/HEAD/DELETE.');
+    if(q.has('uploads')&&(req.method!=='POST'||q.has('uploadId')||q.has('partNumber')||q.get('uploads')!==''))fail('InvalidRequest',400,'Use POST ?uploads to initiate a multipart upload.');
+    if(q.has('uploadId')){
+      if(!q.get('uploadId')||!['GET','PUT','POST','DELETE'].includes(req.method))fail('InvalidRequest',400,'Invalid multipart operation.');
+      if(req.method==='PUT'&&!q.has('partNumber')||req.method!=='PUT'&&q.has('partNumber'))fail('InvalidRequest',400,'partNumber is required only for UploadPart.');
+      if(req.method!=='GET'&&(q.has('part-number-marker')||q.has('max-parts')))fail('InvalidRequest',400,'Part pagination is supported only by ListParts.');
+    }else if(q.has('partNumber')||q.has('part-number-marker')||q.has('max-parts'))fail('InvalidRequest',400,'An uploadId is required.');
+    if(req.method==='POST'&&!q.has('uploads')&&!q.has('uploadId'))unsupported('Only multipart initiation/completion POST operations are supported.');
+  }else if(q.has('versions')||q.has('uploads')){
+    const permitted=q.has('versions')?['versions','prefix','delimiter','key-marker','version-id-marker','max-keys','encoding-type']:['uploads','prefix','delimiter','key-marker','upload-id-marker','max-uploads','encoding-type'];
+    for(const name of q.keys())if(!permitted.includes(name)&&name!=='x-id'&&!(auth.presigned&&(PRESIGN_PARAMS.has(name)||HOISTED_HEADERS.has(name))))fail('InvalidRequest',400,'Conflicting list operations.');
   }
-  if (!['GET', 'HEAD', 'PUT', 'DELETE'].includes(req.method)) unsupported(`The ${req.method} operation is not implemented. Multipart and multi-object delete are not supported.`);
+  if(!key&&!q.has('versions')&&!q.has('uploads')&&['key-marker','version-id-marker','upload-id-marker','max-uploads'].some(name=>q.has(name)))fail('InvalidRequest',400,'Pagination does not match the list operation.');
+  if(q.has('versioning')&&([...q.keys()].some(name=>name!=='versioning'&&name!=='x-id'&&!(auth.presigned&&(PRESIGN_PARAMS.has(name)||HOISTED_HEADERS.has(name))))))fail('InvalidRequest',400,'Versioning cannot be combined with other operations.');
+}
+
+function requestPermission(req,bucket,key,query){
+  if(!bucket)return 'list';if(!key){if(req.method==='PUT')return 'createBucket';if(req.method==='DELETE')return 'deleteBucket';return 'list';}
+  if(query.has('uploadId'))return req.method==='GET'?'list':'write';
+  return ['GET','HEAD'].includes(req.method)?'read':req.method==='DELETE'?'delete':'write';
+}
+function authorizeAccount(req,auth,bucket,key){
+  const account=auth.account,permission=requestPermission(req,bucket,key,auth.query);
+  if(account.expiresAt&&Date.parse(account.expiresAt)<=Date.now())fail('AccessDenied',403,'This access key has expired.');
+  if(bucket&&account.buckets?.length&&!account.buckets.includes(bucket))fail('AccessDenied',403,'This access key cannot access the bucket.');
+  if(Array.isArray(account.permissions)){if(!account.permissions.includes(permission))fail('AccessDenied',403,'This access key does not allow the requested operation.');}
+  else if(!['GET','HEAD'].includes(req.method)&&account.role!=='readwrite')fail('AccessDenied',403,'This access key is read-only.');
+  if(account.prefixes?.length&&bucket){
+    if(['createBucket','deleteBucket'].includes(permission))fail('AccessDenied',403,'Prefix-scoped keys cannot create or delete buckets.');
+    const candidate=key||auth.query.get('prefix')||'';
+    if(!account.prefixes.some(prefix=>candidate.startsWith(prefix)))fail('AccessDenied',403,'Provide an allowed object key or list prefix.');
+  }
 }
 
 function decodeBase64Digest(value, bytes, name) {
@@ -201,9 +231,9 @@ async function* checkedBody(req, checks, maxBytes) {
   }
 }
 
-async function smallBody(req, checks) {
+async function smallBody(req, checks, maxBytes = 65536) {
   const chunks = [];
-  for await (const chunk of checkedBody(req, checks, 65536)) chunks.push(chunk);
+  for await (const chunk of checkedBody(req, checks, maxBytes)) chunks.push(chunk);
   return Buffer.concat(chunks);
 }
 
@@ -218,6 +248,7 @@ function objectHeaders(res, metadata) {
   res.setHeader('last-modified', new Date(metadata.modifiedAt).toUTCString());
   res.setHeader('content-type', metadata.contentType || 'application/octet-stream');
   res.setHeader('accept-ranges', 'bytes');
+  if(metadata.versionId)res.setHeader('x-amz-version-id',metadata.versionId);
 }
 
 function readPreconditions(req, metadata) {
@@ -289,8 +320,29 @@ async function listBucket(res, storage, bucket, query) {
   xmlResponse(res, 200, `<ListBucketResult xmlns="${XMLNS}">${body}</ListBucketResult>`);
 }
 
+function numberParam(query,name,fallback,maximum){const raw=query.get(name);if(raw===undefined){if(fallback===undefined)fail('InvalidArgument',400,`${name} is required.`);return fallback;}if(!/^\d+$/.test(raw)||!Number.isSafeInteger(Number(raw))||Number(raw)>maximum)fail('InvalidArgument',400,`${name} is outside the supported range.`);return Number(raw);}
+function parseComplete(body){
+  const text=body.toString('utf8').trim(),root=/^(?:<\?xml[^?]*\?>\s*)?<CompleteMultipartUpload(?:\s+xmlns=["']http:\/\/s3\.amazonaws\.com\/doc\/2006-03-01\/["'])?>([\s\S]*)<\/CompleteMultipartUpload>$/.exec(text);
+  if(!root)fail('MalformedXML',400,'Invalid CompleteMultipartUpload document.');const parts=[];let remainder=root[1];
+  remainder=remainder.replace(/<Part>([\s\S]*?)<\/Part>/g,(_,inner)=>{let number,etag;const rest=inner.replace(/<(PartNumber|ETag)>([^<>]*)<\/\1>/g,(_,name,value)=>{if(name==='PartNumber'){if(number!==undefined)fail('MalformedXML',400,'Duplicate part number.');number=value.trim();}else{if(etag!==undefined)fail('MalformedXML',400,'Duplicate ETag.');etag=value.trim().replace(/&quot;/g,'"');}return '';});if(rest.trim()||!/^\d+$/.test(number??'')||!/^"?[a-f0-9]{32}"?$/.test(etag??''))fail('MalformedXML',400,'Parts require PartNumber and an MD5 ETag.');parts.push({partNumber:Number(number),etag});return '';});
+  if(remainder.trim()||!parts.length)fail('MalformedXML',400,'The document must contain only Part elements.');return parts;
+}
+function listKeyEncoder(query){const encoding=query.get('encoding-type');if(encoding&&encoding!=='url')fail('InvalidArgument',400,'Only encoding-type=url is supported.');return value=>{if(encoding)return encode(value);if(/[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/u.test(value))fail('InvalidArgument',400,'Use encoding-type=url to list these keys.');return value;};}
+async function listVersions(res,storage,bucket,query){
+  const text=listKeyEncoder(query),prefix=query.get('prefix')||'',delimiter=query.get('delimiter')||'',keyMarker=query.get('key-marker')||'',versionIdMarker=query.get('version-id-marker'),maxKeys=numberParam(query,'max-keys',1000,1000),page=await storage.listObjectVersions(bucket,{prefix,delimiter,keyMarker,versionIdMarker,maxKeys});
+  let body=tag('Name',bucket)+tag('Prefix',text(prefix))+tag('KeyMarker',text(keyMarker))+tag('VersionIdMarker',versionIdMarker||'')+tag('MaxKeys',maxKeys)+tag('IsTruncated',page.isTruncated);if(delimiter)body+=tag('Delimiter',text(delimiter));if(query.has('encoding-type'))body+=tag('EncodingType','url');if(page.isTruncated)body+=tag('NextKeyMarker',text(page.nextKeyMarker))+tag('NextVersionIdMarker',page.nextVersionIdMarker||'');
+  for(const version of page.versions){const kind=version.isDeleteMarker?'DeleteMarker':'Version';body+=`<${kind}>${tag('Key',text(version.key))}${tag('VersionId',version.versionId)}${tag('IsLatest',version.isLatest)}${tag('LastModified',version.modifiedAt)}<Owner>${tag('ID',version.owner||'local')}${tag('DisplayName',version.owner||'local')}</Owner>${version.isDeleteMarker?'':tag('ETag',`"${version.etag}"`)+tag('Size',version.size)+tag('StorageClass','STANDARD')}</${kind}>`;}
+  for(const prefix of page.commonPrefixes)body+=`<CommonPrefixes>${tag('Prefix',text(prefix))}</CommonPrefixes>`;xmlResponse(res,200,`<ListVersionsResult xmlns="${XMLNS}">${body}</ListVersionsResult>`);
+}
+async function listUploads(res,storage,bucket,query,options){
+  const text=listKeyEncoder(query),prefix=query.get('prefix')||'',delimiter=query.get('delimiter')||'',keyMarker=query.get('key-marker')||'',uploadIdMarker=query.get('upload-id-marker'),maxUploads=numberParam(query,'max-uploads',1000,1000),page=await storage.listMultipartUploads(bucket,{...options,prefix,delimiter,keyMarker,uploadIdMarker,maxUploads});
+  let body=tag('Bucket',bucket)+tag('KeyMarker',text(keyMarker))+tag('UploadIdMarker',uploadIdMarker||'')+tag('Prefix',text(prefix))+tag('MaxUploads',maxUploads)+tag('IsTruncated',page.isTruncated);if(delimiter)body+=tag('Delimiter',text(delimiter));if(query.has('encoding-type'))body+=tag('EncodingType','url');if(page.isTruncated)body+=tag('NextKeyMarker',text(page.nextKeyMarker))+tag('NextUploadIdMarker',page.nextUploadIdMarker||'');
+  for(const upload of page.uploads){const identity=tag('ID',upload.owner||'local')+tag('DisplayName',upload.owner||'local');body+=`<Upload>${tag('Key',text(upload.key))}${tag('UploadId',upload.uploadId)}<Initiator>${identity}</Initiator><Owner>${identity}</Owner>${tag('StorageClass','STANDARD')}${tag('Initiated',upload.initiated)}</Upload>`;}
+  for(const prefix of page.commonPrefixes)body+=`<CommonPrefixes>${tag('Prefix',text(prefix))}</CommonPrefixes>`;xmlResponse(res,200,`<ListMultipartUploadsResult xmlns="${XMLNS}">${body}</ListMultipartUploadsResult>`);
+}
+
 /** Path-style, authenticated S3 subset. Unsupported features are rejected explicitly. */
-export async function handleS3(req, res, { storage, lookupKey, region = 'us-east-1', maxObjectBytes = 5 * 1024 ** 3 }) {
+export async function handleS3(req, res, { storage, lookupKey, region = 'us-east-1', maxObjectBytes = 5 * 1024 ** 3, lookupUserPolicy, publicOrigin = '' }) {
   const requestId = randomBytes(12).toString('hex');
   res.setHeader('x-amz-request-id', requestId);
   res.setHeader('x-amz-bucket-region', region);
@@ -308,28 +360,44 @@ export async function handleS3(req, res, { storage, lookupKey, region = 'us-east
     const key = slash < 0 ? '' : decodeURIComponent(auth.path.slice(slash + 1));
     if (bucket && (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket) || bucket.includes('..') || /^\d+\.\d+\.\d+\.\d+$/.test(bucket) || ['console', 'api', 'healthz'].includes(bucket))) fail('InvalidBucketName', 400, 'The bucket name is invalid or reserved.');
     if (key && (Buffer.byteLength(key) > 1024 || key.includes('\0'))) fail('InvalidArgument', 400, 'Object keys must be at most 1024 UTF-8 bytes and cannot contain NUL.');
-    if (bucket && auth.account.buckets?.length && !auth.account.buckets.includes(bucket)) fail('AccessDenied', 403, 'This access key cannot access the requested bucket.');
-    if (!['GET', 'HEAD'].includes(req.method) && auth.account.role !== 'readwrite') fail('AccessDenied', 403, 'This access key is read-only.');
+    authorizeAccount(req,auth,bucket,key);
+    if(lookupUserPolicy&&auth.account.owner){const policy=await lookupUserPolicy(auth.account.owner);if(!policy||policy.enabled===false)fail('AccessDenied',403,'The account is disabled.');}
     requireSupportedRequest(req, auth, bucket, key);
-    const checks = bodyChecks(req, auth.payloadHash);
+    const checks = bodyChecks(req, auth.payloadHash),options={owner:auth.account.owner||''};
     if (req.method === 'PUT' && bucket && key) {
-      const metadata = await storage.putObject(bucket, key, checkedBody(req, checks, maxObjectBytes), {
-        contentType: header(req, 'content-type') || 'application/octet-stream',
-        expectedSha256: auth.payloadHash === 'UNSIGNED-PAYLOAD' ? undefined : auth.payloadHash,
-        expectedMd5: header(req, 'content-md5'),
-      });
-      res.setHeader('etag', `"${metadata.etag}"`);
+      const putOptions={...options,contentType:header(req,'content-type')||'application/octet-stream',expectedSha256:auth.payloadHash==='UNSIGNED-PAYLOAD'?undefined:auth.payloadHash,expectedMd5:header(req,'content-md5')};
+      const metadata = auth.query.has('uploadId')?await storage.uploadPart(bucket,key,auth.query.get('uploadId'),numberParam(auth.query,'partNumber',undefined,10000),checkedBody(req,checks,maxObjectBytes),putOptions):await storage.putObject(bucket,key,checkedBody(req,checks,maxObjectBytes),putOptions);
+      res.setHeader('etag', `"${metadata.etag}"`);if(metadata.versionId)res.setHeader('x-amz-version-id',metadata.versionId);
       for (const name of ['sha256', 'sha1', 'md5', 'crc32', 'crc32c']) if (header(req, `x-amz-checksum-${name}`)) res.setHeader(`x-amz-checksum-${name}`, header(req, `x-amz-checksum-${name}`));
       res.writeHead(200, { 'content-length': '0' }); res.end(); return;
     }
-    const body = await smallBody(req, checks);
-    if (body.length && !(req.method === 'PUT' && bucket && !key)) fail('InvalidRequest', 400, 'This operation does not accept a request body.');
+    const body = await smallBody(req, checks,req.method==='POST'&&auth.query.has('uploadId')?2*1024**2:65536);
+    if (body.length && !(req.method === 'PUT' && bucket && !key) && !(req.method==='POST'&&key&&auth.query.has('uploadId'))) fail('InvalidRequest', 400, 'This operation does not accept a request body.');
+    if(key&&auth.query.has('uploads')){
+      const upload=await storage.createMultipartUpload(bucket,key,{...options,contentType:header(req,'content-type')||'application/octet-stream'});
+      xmlResponse(res,200,`<InitiateMultipartUploadResult xmlns="${XMLNS}">${tag('Bucket',bucket)}${tag('Key',key)}${tag('UploadId',upload.uploadId)}</InitiateMultipartUploadResult>`);return;
+    }
+    if(key&&auth.query.has('uploadId')){
+      const uploadId=auth.query.get('uploadId');
+      if(req.method==='DELETE'){await storage.abortMultipartUpload(bucket,key,uploadId,options);res.writeHead(204);res.end();return;}
+      if(req.method==='POST'){
+        const result=await storage.completeMultipartUpload(bucket,key,uploadId,parseComplete(body),options);res.setHeader('x-amz-version-id',result.versionId);
+        xmlResponse(res,200,`<CompleteMultipartUploadResult xmlns="${XMLNS}">${tag('Location',`${publicOrigin}/${encode(bucket)}/${key.split('/').map(encode).join('/')}`)}${tag('Bucket',bucket)}${tag('Key',key)}${tag('ETag',`"${result.etag}"`)}</CompleteMultipartUploadResult>`);return;
+      }
+      const marker=numberParam(auth.query,'part-number-marker',0,10000),maxParts=numberParam(auth.query,'max-parts',1000,1000),page=await storage.listParts(bucket,key,uploadId,{...options,partNumberMarker:marker,maxParts});
+      const owner=`<Owner>${tag('ID',page.owner||'local')}${tag('DisplayName',page.owner||'local')}</Owner>`;
+      xmlResponse(res,200,`<ListPartsResult xmlns="${XMLNS}">${tag('Bucket',bucket)}${tag('Key',key)}${tag('UploadId',uploadId)}${owner}<Initiator>${tag('ID',page.owner||'local')}${tag('DisplayName',page.owner||'local')}</Initiator>${tag('StorageClass','STANDARD')}${tag('PartNumberMarker',marker)}${tag('NextPartNumberMarker',page.nextPartNumberMarker||0)}${tag('MaxParts',maxParts)}${tag('IsTruncated',page.isTruncated)}${page.parts.map(part=>`<Part>${tag('PartNumber',part.partNumber)}${tag('LastModified',part.modifiedAt)}${tag('ETag',`"${part.etag}"`)}${tag('Size',part.size)}</Part>`).join('')}</ListPartsResult>`);return;
+    }
     if (!bucket) {
       if (req.method !== 'GET') unsupported('Only ListBuckets is implemented at the service root.');
       const buckets = (await storage.buckets()).filter(b => !auth.account.buckets?.length || auth.account.buckets.includes(b.name));
       xmlResponse(res, 200, `<ListAllMyBucketsResult xmlns="${XMLNS}"><Owner>${tag('ID', 'local')}${tag('DisplayName', 'local')}</Owner><Buckets>${buckets.map(b => `<Bucket>${tag('Name', b.name)}${tag('CreationDate', b.createdAt)}</Bucket>`).join('')}</Buckets></ListAllMyBucketsResult>`); return;
     }
     if (!key) {
+      if (req.method === 'POST') unsupported('This bucket POST operation is not supported.');
+      if(auth.query.has('versioning')){await storage.listObjects(bucket,{maxKeys:0});xmlResponse(res,200,`<VersioningConfiguration xmlns="${XMLNS}">${tag('Status','Enabled')}</VersioningConfiguration>`);return;}
+      if(auth.query.has('versions')){await listVersions(res,storage,bucket,auth.query);return;}
+      if(auth.query.has('uploads')){await listUploads(res,storage,bucket,auth.query,options);return;}
       if (req.method === 'PUT') {
         if (body.length) {
           const configuration = body.toString('utf8').trim();
@@ -351,8 +419,8 @@ export async function handleS3(req, res, { storage, lookupKey, region = 'us-east
       }
       await listBucket(res, storage, bucket, auth.query); return;
     }
-    if (req.method === 'DELETE') { await storage.deleteObject(bucket, key); res.writeHead(204); res.end(); return; }
-    const result = req.method === 'GET' ? await storage.getObject(bucket, key) : { metadata: await storage.headObject(bucket, key) };
+    if (req.method === 'DELETE') { const deleted=await storage.deleteObject(bucket, key,{versionId:auth.query.get('versionId')}); if(deleted?.versionId)res.setHeader('x-amz-version-id',deleted.versionId);if(deleted?.isDeleteMarker)res.setHeader('x-amz-delete-marker','true');res.writeHead(204); res.end(); return; }
+    const result = req.method === 'GET' ? await storage.getObject(bucket, key,{versionId:auth.query.get('versionId')}) : { metadata: await storage.headObject(bucket, key,{versionId:auth.query.get('versionId')}) };
     const { metadata, stream } = result;
     let range;
     try {
@@ -374,6 +442,7 @@ export async function handleS3(req, res, { storage, lookupKey, region = 'us-east
     const code = known ? error.code : 'InternalError';
     const message = known ? error.message : 'An internal storage error occurred.';
     for (const name of ['content-length', 'content-range', 'etag', 'last-modified']) res.removeHeader(name);
+    if(error.deleteMarker){res.setHeader('x-amz-delete-marker','true');res.setHeader('x-amz-version-id',error.versionId);}
     const errorBody = `<Error>${tag('Code', code)}${tag('Message', message)}${tag('RequestId', requestId)}</Error>`;
     if (req.method === 'HEAD') { res.writeHead(status, { 'content-length': '0' }); res.end(); }
     else xmlResponse(res, status, errorBody);

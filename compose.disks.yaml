@@ -1,0 +1,38 @@
+# Optional agent: mount capability is isolated from the application container.
+# Run this agent on each storage host. Do not publish its port to the Internet.
+services:
+  disk-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.disk-agent
+    image: 27g-storeges3:disk-agent
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [SYS_ADMIN, DAC_OVERRIDE, CHOWN, FOWNER]
+    security_opt: [apparmor:unconfined]
+    device_cgroup_rules: ['b *:* rwm']
+    environment:
+      DISK_TOKEN_FILE: /run/secrets/disk_token
+      DISK_ALLOWED_ROOTS: /external
+      DISK_HOST_MOUNTINFO_FILE: /run/host-mountinfo
+      DISK_ALLOW_BLOCK_DEVICES: ${DISK_ALLOW_BLOCK_DEVICES:-false}
+      # Optional physical-host identity shared only by agents on the same host.
+      DISK_HOST_ID: ${DISK_HOST_ID:-}
+    volumes:
+      - disk-agent:/var/lib/storeges3-disks
+      - /dev:/dev
+      - /proc/1/mountinfo:/run/host-mountinfo:ro
+      - ${DISK_DIRECTORY:-/mnt}:/external:rslave
+    tmpfs: [/tmp:size=32m,mode=1777, /run:size=16m,mode=0755]
+    secrets: [disk_token]
+    networks: [storage]
+volumes:
+  disk-agent:
+secrets:
+  disk_token:
+    file: ./secrets/disk_token
+
+networks:
+  storage:

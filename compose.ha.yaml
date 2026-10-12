@@ -1,0 +1,142 @@
+# Isolated, single-host HA demonstration. Three failure domains are required
+# for machine-failure protection: master, slave, independent etcd witness.
+name: 27g-storeges3-ha
+
+x-app: &app
+  image: 27g-storeges3:local
+  build: .
+  init: true
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: [/tmp:size=128m,mode=1777]
+  pids_limit: 128
+  mem_limit: 1024m
+  stop_grace_period: 35s
+  networks: [ha]
+
+x-etcd: &etcd
+  image: gcr.io/etcd-development/etcd:v3.6.5
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: [/tmp:size=16m,mode=1777]
+  networks: [ha]
+  environment: &etcd-env
+    ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+    ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+    ETCD_INITIAL_CLUSTER: etcd-master=http://etcd-master:2380,etcd-slave=http://etcd-slave:2380,etcd-witness=http://etcd-witness:2380
+    ETCD_INITIAL_CLUSTER_STATE: new
+    ETCD_INITIAL_CLUSTER_TOKEN: 27g-ha-v1
+    ETCD_DATA_DIR: /etcd-data
+    ETCD_MAX_REQUEST_BYTES: 16777216
+    ETCD_QUOTA_BACKEND_BYTES: 2147483648
+    ETCD_AUTO_COMPACTION_MODE: periodic
+    ETCD_AUTO_COMPACTION_RETENTION: 1h
+
+x-coordinator-env: &coordinator-env
+  HOST: 0.0.0.0
+  PORT: 9000
+  DATA_DIR: /data
+  PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://127.0.0.1:9020}
+  HA_CLUSTER_ID: ${HA_CLUSTER_ID:-storeges3}
+  HA_ETCD_ENDPOINTS: http://etcd-master:2379,http://etcd-slave:2379,http://etcd-witness:2379
+  HA_MASTER_KEY_FILE: /run/secrets/ha_master_key
+  HA_SETUP_TOKEN_FILE: /run/secrets/ha_setup_token
+
+services:
+  gateway:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["127.0.0.1:9020:9000"]
+    volumes: ["./Caddyfile.ha:/etc/caddy/Caddyfile:ro"]
+    networks: [ha]
+    depends_on: [master, slave]
+    security_opt: [no-new-privileges:true]
+  master:
+    <<: *app
+    command: [sh, -c, "node src/ha-secrets.mjs && exec node src/server.mjs"]
+    environment:
+      <<: *coordinator-env
+      HA_NODE_ID: master
+      HA_ROLE: master
+    volumes: [master:/data]
+    secrets: [ha_master_key, ha_setup_token]
+    depends_on: [etcd-master, etcd-slave, etcd-witness]
+  slave:
+    <<: *app
+    command: [sh, -c, "node src/ha-secrets.mjs && exec node src/server.mjs"]
+    environment:
+      <<: *coordinator-env
+      HA_NODE_ID: slave
+      HA_ROLE: slave
+    volumes: [slave:/data]
+    secrets: [ha_master_key, ha_setup_token]
+    depends_on: [etcd-master, etcd-slave, etcd-witness]
+  storage-master:
+    <<: *app
+    command: [node, src/node.mjs]
+    environment:
+      HOST: 0.0.0.0
+      NODE_PORT: 9100
+      DATA_DIR: /data
+      NODE_TOKEN_FILE: /run/secrets/node_token
+    volumes: [storage-master:/data]
+    secrets: [node_token]
+  storage-slave:
+    <<: *app
+    command: [node, src/node.mjs]
+    environment:
+      HOST: 0.0.0.0
+      NODE_PORT: 9100
+      DATA_DIR: /data
+      NODE_TOKEN_FILE: /run/secrets/node_token
+    volumes: [storage-slave:/data]
+    secrets: [node_token]
+  etcd-master:
+    <<: *etcd
+    environment:
+      <<: *etcd-env
+      ETCD_NAME: etcd-master
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd-master:2379
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd-master:2380
+    volumes: [etcd-master:/etcd-data]
+  etcd-slave:
+    <<: *etcd
+    environment:
+      <<: *etcd-env
+      ETCD_NAME: etcd-slave
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd-slave:2379
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd-slave:2380
+    volumes: [etcd-slave:/etcd-data]
+  etcd-witness:
+    <<: *etcd
+    environment:
+      <<: *etcd-env
+      ETCD_NAME: etcd-witness
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd-witness:2379
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd-witness:2380
+    volumes: [etcd-witness:/etcd-data]
+
+networks:
+  ha:
+    internal: true
+
+volumes:
+  master:
+  slave:
+  storage-master:
+  storage-slave:
+  etcd-master:
+  etcd-slave:
+  etcd-witness:
+
+secrets:
+  node_token:
+    file: ./secrets/node_token
+  ha_master_key:
+    file: ./secrets/ha_master_key
+  ha_setup_token:
+    file: ./secrets/ha_setup_token

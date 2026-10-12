@@ -37,9 +37,8 @@ export class Shares {
     return { ...summary(row), token };
   }
   list(bucket, key, blobId) {
-    this.prune();
-    return this.db.prepare('SELECT id, created_at, expires_at FROM shares WHERE bucket=? AND object_key=? AND blob_id=? ORDER BY created_at DESC')
-      .all(bucket, key, blobId).map(summary);
+    return this.db.prepare('SELECT id, created_at, expires_at FROM shares WHERE bucket=? AND object_key=? AND blob_id=? AND expires_at>? ORDER BY created_at DESC')
+      .all(bucket, key, blobId, Date.now()).map(summary);
   }
   get(token) {
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
@@ -49,6 +48,15 @@ export class Shares {
   revoke(id) {
     if (!this.db.prepare('DELETE FROM shares WHERE id=?').run(id).changes)
       throw new ApiError(404, 'Ссылка не найдена.');
+  }
+  exportState() { return { version: 1, shares: this.db.prepare('SELECT * FROM shares ORDER BY id').all() }; }
+  importState(state) {
+    if (state?.version !== 1 || !Array.isArray(state.shares) || state.shares.length > MAX_ACTIVE_SHARES) throw new Error('Invalid shares snapshot');
+    const columns = ['id', 'token_hash', 'bucket', 'object_key', 'blob_id', 'created_at', 'expires_at'];
+    for (const row of state.shares) if (!row || columns.some(column => !Object.hasOwn(row, column)) || !/^[a-f0-9]{64}$/.test(row.token_hash) || !Number.isSafeInteger(row.created_at) || !Number.isSafeInteger(row.expires_at)) throw new Error('Invalid share snapshot row');
+    this.db.exec('BEGIN IMMEDIATE');
+    try { this.db.exec('DELETE FROM shares'); const insert = this.db.prepare('INSERT INTO shares VALUES(?,?,?,?,?,?,?)'); for (const row of state.shares) insert.run(...columns.map(column => row[column])); this.db.exec('COMMIT'); }
+    catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   close() { this.db.close(); }
 }
