@@ -103,6 +103,7 @@ jobs:
           docker compose -f compose.ha.yaml config --quiet
           docker compose -f compose.yaml -f compose.https.yaml config --quiet
           docker compose -f compose.yaml -f compose.disks.yaml config --quiet
+          docker compose -f compose.yaml -f compose.init.yaml config --quiet
       - name: Reproducible allowlisted release archive
         run: |
           version="v$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')"
@@ -116,6 +117,8 @@ jobs:
           test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/scripts/install-ru.sh"
           test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/README.md"
           test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/README.ru.md"
+          test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/compose.init.yaml"
+          test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/docs/INITIALIZATION.md"
           test -s "$RUNNER_TEMP/release-one/install.sh"
           test -s "$RUNNER_TEMP/release-one/install-ru.sh"
           test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/web/brand-mark.png"
@@ -157,6 +160,8 @@ jobs:
           cache-to: type=gha,mode=max,scope=disk-agent
       - name: Actual container auth, writes and persistence after restart
         run: sudo env "PATH=$PATH" bash scripts/container-smoke.sh 27g-storage-s3:ci 27g-storage-s3-disk-agent:ci
+      - name: Initial migration, S3 credentials and same-volume restart
+        run: sudo env "PATH=$PATH" bash scripts/bootstrap-smoke.sh 27g-storage-s3:ci
       - name: Installer and in-place update on the same data volume
         run: sudo env "PATH=$PATH" bash scripts/installer-smoke.sh
 
