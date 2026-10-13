@@ -29,7 +29,7 @@ async function digestFile(path) {
   for await (const chunk of createReadStream(path)) { sha.update(chunk); size += chunk.length; }
   return { size, sha256: sha.digest('hex') };
 }
-function validBucket(name) {
+export function validBucket(name) {
   if (['api', 'console', 'healthz', 'share'].includes(name)) fail('InvalidBucketName', 'This bucket name is reserved for the control panel.');
   if (typeof name !== 'string' || name.length < 3 || name.length > 63 || !/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(name) || name.includes('..') || name.includes('.-') || name.includes('-.') || /^\d+\.\d+\.\d+\.\d+$/.test(name) || /^(xn--|sthree-|amzn-s3-demo-)/.test(name) || /(-s3alias|--ol-s3|\.mrap|--x-s3|--table-s3)$/.test(name)) fail('InvalidBucketName', 'Bucket names must be DNS-compatible, 3–63 lowercase characters.');
 }

@@ -17,6 +17,7 @@ import { CommitResponse } from './ha-response.mjs';
 import { objectPreview } from './preview.mjs';
 import { BucketPolicies } from './bucket-policy.mjs';
 import { AgentEnrollment } from './agent-enrollment.mjs';
+import { initializeSystem } from './bootstrap.mjs';
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../web');
 const VERSION = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -121,6 +122,7 @@ export async function createApp(options = {}) {
   let auth, storage, shares, ha;
   const haOptions = options.ha || (process.env.HA_ETCD_ENDPOINTS ? { endpoints: process.env.HA_ETCD_ENDPOINTS.split(','), nodeId: process.env.HA_NODE_ID, role: process.env.HA_ROLE || 'slave', clusterId: process.env.HA_CLUSTER_ID || 'storeges3' } : null);
   try {
+    if (options.initOnly && haOptions) throw new Error('--init-only is for standalone installations; HA initializes its first master under the cluster lease');
     const maxObjectBytes = int(options.maxObjectBytes ?? process.env.MAX_OBJECT_BYTES, 5 * 1024 ** 3, 1, 5 * 1024 ** 3, 'MAX_OBJECT_BYTES');
     storage = new Storage({ dataDir, maxObjectBytes,
       cacheBytes: int(options.cacheBytes ?? process.env.CACHE_BYTES, 64 * 1024 ** 2, 0, 1024 ** 3, 'CACHE_BYTES'),
@@ -139,7 +141,8 @@ export async function createApp(options = {}) {
       catch (error) { if (error.code !== 'ENOENT') throw error; await writeFile(join(dataDir, 'master.key'), sharedKey, { flag: 'wx', mode: 0o600, flush: true }); }
     }
     auth = new Auth({ dataDir, secureCookies, setupToken: options.setupToken ?? process.env.SETUP_TOKEN });
-    await auth.initializeDefaults();
+    const initializeState = () => initializeSystem({ auth, storage, env: options.initEnv ?? process.env });
+    if (!haOptions) await initializeState();
     shares = new Shares({ dataDir });
     const bucketPolicies = new BucketPolicies({ auth, storage });
     const enrollment = new AgentEnrollment({ auth });
@@ -156,6 +159,7 @@ export async function createApp(options = {}) {
     if (haOptions) {
       storage.requireRemoteMirrors = true; storage.garbageCollectionEnabled = false;
       ha = new HaCoordinator({ ...haOptions, dataDir, encryptionKey: auth.masterKey,
+        initializeState,
         exportState: () => ({ storage: storage.exportState(), auth: auth.exportState(), shares: shares.exportState() }),
         importState: async state => { await storage.importState(state.storage); auth.importState(state.auth); shares.importState(state.shares); refreshPreferences(); },
         validateState: state => {
@@ -188,14 +192,14 @@ export async function createApp(options = {}) {
     }
     let maintenance = null;
     let background = null;
-    const maintenanceTimer = setInterval(() => {
+    const maintenanceTimer = options.initOnly ? null : setInterval(() => {
       if ((ha && !ha.isLeader) || !scrubIntervalSeconds || maintenance || Date.now() < (lastScrub ?? started) + scrubIntervalSeconds * 1000) return;
       maintenance = { action: 'automatic-scrub', startedAt: new Date().toISOString() };
       background = guarded(true, async () => { const result = await storage.scrub(); auth.setPreference('lastScrubResult', result); auth.setPreference('lastScrubAt', Date.now()); auth.audit('cluster.automatic_scrub', JSON.stringify(result)); })
         .catch(error => { console.error(JSON.stringify({ event: 'automatic_scrub.failed', code: error.code || 'InternalError' })); })
         .finally(() => { maintenance = null; background = null; lastScrub = Date.now(); });
     }, 30_000);
-    maintenanceTimer.unref();
+    maintenanceTimer?.unref();
     async function admin(req, res, url) {
       refreshPreferences();
       const path = url.pathname, method = req.method, mutation = mutations.has(method);
@@ -482,16 +486,24 @@ export async function createApp(options = {}) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   process.umask(0o077);
-  const app = await createApp();
-  const port = int(process.env.PORT, 9000, 1, 65535, 'PORT'), host = process.env.HOST || '127.0.0.1';
-  app.server.listen(port, host, () => {
-    console.log(`27G-StorageS3 ${VERSION}: http://${host}:${port}/console/`);
-    if (app.auth.defaultCredentials) console.log(`Initial setup token: ${app.auth.setupToken}`);
-  });
-  let stopping = false;
-  for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, async () => {
-    if (stopping) return; stopping = true;
-    const timeout = setTimeout(() => process.exit(1), 30_000); timeout.unref();
-    await app.close(); clearTimeout(timeout); process.exit(0);
-  });
+  const args = process.argv.slice(2);
+  if (args.some(arg => arg !== '--init-only') || args.length > 1) throw new Error('Usage: node src/server.mjs [--init-only]');
+  const initOnly = args.includes('--init-only');
+  const app = await createApp({ initOnly });
+  if (initOnly) {
+    await app.close();
+    console.log('27G-StorageS3 initialization complete. Existing installations are left unchanged.');
+  } else {
+    const port = int(process.env.PORT, 9000, 1, 65535, 'PORT'), host = process.env.HOST || '127.0.0.1';
+    app.server.listen(port, host, () => {
+      console.log(`27G-StorageS3 ${VERSION}: http://${host}:${port}/console/`);
+      if (app.auth.defaultCredentials) console.log(`Initial setup token: ${app.auth.setupToken}`);
+    });
+    let stopping = false;
+    for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, async () => {
+      if (stopping) return; stopping = true;
+      const timeout = setTimeout(() => process.exit(1), 30_000); timeout.unref();
+      await app.close(); clearTimeout(timeout); process.exit(0);
+    });
+  }
 }

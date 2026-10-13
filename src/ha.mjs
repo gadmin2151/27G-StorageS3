@@ -26,7 +26,7 @@ async function writeJSON(path, value) {
 // Every HTTP response acknowledging a mutation MUST wait for run() to return.
 export class HaCoordinator {
   constructor({ endpoints, nodeId, role = 'slave', clusterId = 'storeges3', encryptionKey,
-    exportState, importState, validateState = () => {}, bootstrap,
+    exportState, importState, validateState = () => {}, initializeState = () => {}, bootstrap,
     leaseTTL = 15, pollMs = 1000, snapshotBytes = 8 * 1024 ** 2, client, tls, timeoutMs, dataDir }) {
     if (dataDir) {
       this.rolePath = join(dataDir, 'ha-node.json');
@@ -49,7 +49,7 @@ export class HaCoordinator {
     if (typeof exportState !== 'function' || typeof importState !== 'function') throw new Error('HA state adapters are required');
     if (!Number.isSafeInteger(snapshotBytes) || snapshotBytes < 1024 || snapshotBytes > 16 * 1024 ** 2) throw new Error('Invalid HA snapshot limit');
     this.client = client || new EtcdClient({ endpoints, tls, timeoutMs });
-    Object.assign(this, { nodeId, role, clusterId, encryptionKey, exportState, importState, validateState, bootstrap, leaseTTL, pollMs, snapshotBytes });
+    Object.assign(this, { nodeId, role, clusterId, encryptionKey, exportState, importState, validateState, initializeState, bootstrap, leaseTTL, pollMs, snapshotBytes });
     this.prefix = `/27g/${clusterId}`; this.leaderKey = `${this.prefix}/leader`; this.stateKey = `${this.prefix}/state`;
     this.owner = JSON.stringify({ nodeId, session: randomUUID() });
     this.state = 'starting'; this.lease = null; this.revision = '0'; this.committed = null;
@@ -120,7 +120,7 @@ export class HaCoordinator {
     if (lease) this.client.revoke(lease).catch(() => {});
   }
   async _tick() {
-    if (this.closed || this.pollBusy) return;
+    if (this.closed || this.pollBusy || this.initializationError) return;
     this.pollBusy = true;
     try {
       await this._locked(async () => {
@@ -145,6 +145,10 @@ export class HaCoordinator {
         if (current.leader?.value.toString() !== this.owner) throw new HaUnavailable();
         if (current.snapshot) await this._load(current.snapshot);
         else {
+          // Initial users/buckets belong to the authoritative cluster state,
+          // never to a fresh slave's local projection. Commit remains fenced.
+          try { await this.initializeState(); }
+          catch (error) { this.initializationError = error; throw error; }
           const initial = await this.exportState(); await this.validateState(initial);
           const encoded = this._encode(initial);
           const result = await this.client.transaction(this._compares('0'), [{ key: this.stateKey, value: encoded.value }]);
@@ -170,6 +174,7 @@ export class HaCoordinator {
   }
   async start() {
     await this._tick();
+    if (this.initializationError) throw this.initializationError;
     this.timer = setInterval(() => this._tick(), this.pollMs); this.timer.unref();
     this.renewTimer = setInterval(() => this._renew(), Math.max(250, Math.floor(this.leaseTTL * 1000 / 3))); this.renewTimer.unref();
     return this;

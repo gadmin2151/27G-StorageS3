@@ -46,6 +46,28 @@ function requirePassword(password) {
   if (typeof password !== 'string' || password.length < 12 || Buffer.byteLength(password) > 1024)
     throw new ApiError(400, 'Пароль должен содержать от 12 до 1024 байт.');
 }
+function normalizeUser({ username, password, role = 'viewer', quotaBytes = null, quotaObjects = null }) {
+  if (typeof username !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.@-]{2,79}$/.test(username)) throw new ApiError(400, 'Логин: 3–80 латинских букв, цифр, точек, дефисов, @ или _.');
+  requirePassword(password);
+  if (!USER_ROLES.includes(role)) throw new ApiError(400, 'Неверная роль пользователя.');
+  return { username, password, role, quotaBytes: quota(quotaBytes, 'Квота объёма'), quotaObjects: quota(quotaObjects, 'Квота объектов') };
+}
+function normalizeKey({ label, role = 'readwrite', buckets = [], prefixes = [], permissions, expiresAt = null }) {
+  if (typeof label !== 'string' || label.length < 1 || label.length > 100) throw new ApiError(400, 'Название ключа: от 1 до 100 символов.');
+  if (!['readonly', 'readwrite'].includes(role) || !Array.isArray(buckets) || buckets.length > 100 || buckets.some(b => typeof b !== 'string' || !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(b)))
+    throw new ApiError(400, 'Неверная роль или список бакетов.');
+  if (!Array.isArray(prefixes) || prefixes.length > 100 || prefixes.some(p => typeof p !== 'string' || !p.length || Buffer.byteLength(p) > 1024 || p.includes('\0'))) throw new ApiError(400, 'Неверный список префиксов.');
+  permissions ??= role === 'readonly' ? ['read', 'list'] : [...KEY_PERMISSIONS];
+  if (!Array.isArray(permissions) || !permissions.length || permissions.length > KEY_PERMISSIONS.length || permissions.some(p => !KEY_PERMISSIONS.includes(p)) || new Set(permissions).size !== permissions.length) throw new ApiError(400, 'Неверные разрешения ключа.');
+  if (role === 'readonly' && permissions.some(p => !['read', 'list'].includes(p))) throw new ApiError(400, 'Ключ только для чтения не может изменять данные.');
+  if (prefixes.length && permissions.some(p => ['createBucket', 'deleteBucket'].includes(p))) throw new ApiError(400, 'Ключ с префиксами не может создавать или удалять целые бакеты.');
+  if (expiresAt !== null && (typeof expiresAt !== 'string' || !Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now())) throw new ApiError(400, 'Срок действия ключа должен быть в будущем.');
+  return { label, role, buckets, prefixes: [...new Set(prefixes)], permissions, expiresAt: expiresAt === null ? null : new Date(expiresAt).toISOString() };
+}
+function requireKeyOwner(account, permissions) {
+  if (!account?.enabled) throw new ApiError(400, 'Владелец ключа не найден или отключён.');
+  if (account.role === 'viewer' && permissions.some(p => !['read', 'list'].includes(p))) throw new ApiError(403, 'Наблюдатель может иметь только ключи чтения.');
+}
 async function passwordHash(password, salt = randomBytes(16).toString('hex')) {
   const digest = await derive(password, salt, 64, { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
   return `${salt}:${digest.toString('hex')}`;
@@ -59,6 +81,7 @@ async function verifyPassword(password, stored) {
 export class Auth {
   constructor({ dataDir, setupToken, secureCookies = false }) {
     mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+    this.dataDir = dataDir;
     this.secureCookies = secureCookies;
     const masterPath = join(dataDir, 'master.key');
     try { this.masterKey = readFileSync(masterPath); }
@@ -88,11 +111,11 @@ export class Auth {
     chmodSync(join(dataDir, 'auth.sqlite'), 0o600);
     this.sessions = new Map(); this.attempts = new Map(); this.pendingMfa = new Map(); this.busy = 0;
     const tokenPath = join(dataDir, 'setup.token');
-    if (setupToken && (typeof setupToken !== 'string' || setupToken.length < 24)) throw new Error('SETUP_TOKEN must contain at least 24 characters');
-    try { this.setupToken = setupToken || readFileSync(tokenPath, 'utf8').trim(); }
+    if (setupToken && (typeof setupToken !== 'string' || setupToken.length < 24 || setupToken.length > 512)) { this.db.close(); throw new Error('SETUP_TOKEN must contain 24–512 characters'); }
+    try { const persisted = readFileSync(tokenPath, 'utf8').trim(); this.setupToken = setupToken || persisted; }
     catch (err) {
       if (err.code !== 'ENOENT') throw err;
-      this.setupToken = randomBytes(32).toString('base64url');
+      this.setupToken = setupToken || randomBytes(32).toString('base64url');
       writeFileSync(tokenPath, this.setupToken, { mode: 0o600, flag: 'wx', flush: true });
     }
     if (this.setupToken.length < 24 || this.setupToken.length > 512) { this.db.close(); throw new Error('Invalid setup.token: expected 24–512 characters'); }
@@ -113,6 +136,38 @@ export class Auth {
       }
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+  // Internal first-start import, never called by the HTTP key/user endpoints.
+  // Hashing and validation finish before any users, keys or journal are stored.
+  async initializeBootstrap({ users, keys, buckets, createdAt, credentials }) {
+    if (!Array.isArray(users) || !users.length || users.length > 1000 || !Array.isArray(keys) || keys.length > 1000) throw new Error('Initialization: invalid account counts.');
+    const accounts = users.map(input => ({ ...normalizeUser(input), language: input.language ?? 'en' }));
+    if (accounts.some(user => !['en', 'ru'].includes(user.language)) || !accounts.some(user => user.role === 'admin') || new Set(accounts.map(user => user.username)).size !== accounts.length)
+      throw new Error('Initialization: unique users and at least one administrator are required.');
+    const owners = new Map(accounts.map(user => [user.username, { ...user, enabled: true }]));
+    const preparedKeys = keys.map(input => {
+      const normalized = normalizeKey(input);
+      requireKeyOwner(owners.get(input.owner), normalized.permissions);
+      if (typeof input.accessKey !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$/.test(input.accessKey)) throw new Error('Initialization: accessKey must contain 3–128 ASCII letters, digits, dots, underscores or hyphens.');
+      if (typeof input.secretKey !== 'string' || !/^[!-~]{32,512}$/.test(input.secretKey)) throw new Error('Initialization: secretKey must contain 32–512 printable ASCII characters without spaces.');
+      return { ...normalized, id: randomUUID(), accessKey: input.accessKey, secret: this.encrypt(input.secretKey), owner: input.owner };
+    });
+    if (new Set(preparedKeys.map(key => key.accessKey)).size !== preparedKeys.length) throw new Error('Initialization: access keys must be unique.');
+    for (const user of accounts) user.digest = await passwordHash(user.password);
+    const journal = { version: 1, status: 'pending', createdAt, buckets, credentials: this.encrypt(JSON.stringify(credentials)) };
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      if (this.db.prepare('SELECT 1 FROM users LIMIT 1').get() || this.db.prepare('SELECT 1 FROM access_keys LIMIT 1').get() || this.preference('initialBootstrap', null))
+        throw new Error('Initialization: the installation was already initialized.');
+      for (const user of accounts) this.db.prepare('INSERT INTO users (username,password,role,quota_bytes,quota_objects) VALUES (?,?,?,?,?)').run(user.username, user.digest, user.role, user.quotaBytes, user.quotaObjects);
+      for (const key of preparedKeys) this._insertKey(key, createdAt);
+      this.setPreference('defaultCredentials', false);
+      this.setPreference('userLanguages', Object.fromEntries(accounts.map(user => [user.username, user.language])));
+      this.setPreference('initialBootstrap', journal);
+      this.audit('system.initialized_accounts', `${accounts.length} users, ${preparedKeys.length} keys`);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    return journal;
   }
   encrypt(secret) {
     const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', this.masterKey, iv);
@@ -215,10 +270,7 @@ export class Auth {
   }
   listUsers() { return this.db.prepare('SELECT * FROM users ORDER BY username').all().map(publicUser); }
   async createUser({ username, password, role = 'viewer', quotaBytes = null, quotaObjects = null }) {
-    if (typeof username !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.@-]{2,79}$/.test(username)) throw new ApiError(400, 'Логин: 3–80 латинских букв, цифр, точек, дефисов, @ или _.');
-    requirePassword(password);
-    if (!USER_ROLES.includes(role)) throw new ApiError(400, 'Неверная роль пользователя.');
-    const bytes = quota(quotaBytes, 'Квота объёма'), objects = quota(quotaObjects, 'Квота объектов');
+    const { quotaBytes: bytes, quotaObjects: objects } = normalizeUser({ username, password, role, quotaBytes, quotaObjects });
     if (this.db.prepare('SELECT 1 FROM users WHERE username=?').get(username)) throw new ApiError(409, 'Такой пользователь уже существует.');
     if (this.listUsers().length >= 1000) throw new ApiError(409, 'Достигнут лимит в 1000 пользователей.');
     const digest = await passwordHash(password);
@@ -317,24 +369,19 @@ export class Auth {
     const rows = owner === undefined ? this.db.prepare('SELECT * FROM access_keys ORDER BY created_at DESC').all() : this.db.prepare('SELECT * FROM access_keys WHERE owner=? ORDER BY created_at DESC').all(owner);
     return rows.map(k => ({ id: k.id, accessKey: k.access_key, label: k.label, role: k.role, buckets: JSON.parse(k.buckets), createdAt: k.created_at, owner: k.owner, prefixes: JSON.parse(k.prefixes), permissions: k.permissions ? JSON.parse(k.permissions) : (k.role === 'readonly' ? ['read', 'list'] : [...KEY_PERMISSIONS]), expiresAt: k.expires_at }));
   }
-  createKey({ label, role = 'readwrite', buckets = [], prefixes = [], permissions, expiresAt = null, owner: requestedOwner }, { owner } = {}) {
-    if (typeof label !== 'string' || label.length < 1 || label.length > 100) throw new ApiError(400, 'Название ключа: от 1 до 100 символов.');
-    if (!['readonly', 'readwrite'].includes(role) || !Array.isArray(buckets) || buckets.length > 100 || buckets.some(b => typeof b !== 'string' || !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(b)))
-      throw new ApiError(400, 'Неверная роль или список бакетов.');
-    if (!Array.isArray(prefixes) || prefixes.length > 100 || prefixes.some(p => typeof p !== 'string' || !p.length || Buffer.byteLength(p) > 1024 || p.includes('\0'))) throw new ApiError(400, 'Неверный список префиксов.');
-    permissions ??= role === 'readonly' ? ['read', 'list'] : [...KEY_PERMISSIONS];
-    if (!Array.isArray(permissions) || !permissions.length || permissions.length > KEY_PERMISSIONS.length || permissions.some(p => !KEY_PERMISSIONS.includes(p)) || new Set(permissions).size !== permissions.length) throw new ApiError(400, 'Неверные разрешения ключа.');
-    if (role === 'readonly' && permissions.some(p => !['read', 'list'].includes(p))) throw new ApiError(400, 'Ключ только для чтения не может изменять данные.');
-    if (prefixes.length && permissions.some(p => ['createBucket', 'deleteBucket'].includes(p))) throw new ApiError(400, 'Ключ с префиксами не может создавать или удалять целые бакеты.');
-    if (expiresAt !== null && (typeof expiresAt !== 'string' || !Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now())) throw new ApiError(400, 'Срок действия ключа должен быть в будущем.');
-    const keyOwner = owner ?? requestedOwner ?? this.db.prepare("SELECT username FROM users WHERE enabled=1 AND role='admin' ORDER BY username LIMIT 1").get()?.username;
-    const account = keyOwner && this.userPolicy(keyOwner);
-    if (!account?.enabled) throw new ApiError(400, 'Владелец ключа не найден или отключён.');
-    if (account.role === 'viewer' && permissions.some(p => !['read', 'list'].includes(p))) throw new ApiError(403, 'Наблюдатель может иметь только ключи чтения.');
+  _insertKey(key, createdAt) {
+    this.db.prepare('INSERT INTO access_keys (id,access_key,secret,label,role,buckets,created_at,owner,prefixes,permissions,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(key.id, key.accessKey, key.secret, key.label, key.role, JSON.stringify(key.buckets), createdAt, key.owner, JSON.stringify(key.prefixes), JSON.stringify(key.permissions), key.expiresAt);
+  }
+  createKey(input, { owner } = {}) {
+    const normalized = normalizeKey(input);
+    const keyOwner = owner ?? input.owner ?? this.db.prepare("SELECT username FROM users WHERE enabled=1 AND role='admin' ORDER BY username LIMIT 1").get()?.username;
+    requireKeyOwner(keyOwner && this.userPolicy(keyOwner), normalized.permissions);
     if (this.listKeys().length >= 1000) throw new ApiError(409, 'Достигнут лимит в 1000 ключей.');
+    // Only the internal initializer imports supplied material. The public API
+    // always generates a fresh independent credential pair.
     const id = randomUUID(), accessKey = `G27${randomBytes(10).toString('hex').toUpperCase()}`, secretKey = randomBytes(32).toString('base64url');
-    this.db.prepare('INSERT INTO access_keys (id,access_key,secret,label,role,buckets,created_at,owner,prefixes,permissions,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(id, accessKey, this.encrypt(secretKey), label, role, JSON.stringify(buckets), new Date().toISOString(), keyOwner, JSON.stringify([...new Set(prefixes)]), JSON.stringify(permissions), expiresAt === null ? null : new Date(expiresAt).toISOString());
-    this.audit('key.created', `${accessKey} (${role})`);
+    this._insertKey({ ...normalized, id, accessKey, secret: this.encrypt(secretKey), owner: keyOwner }, new Date().toISOString());
+    this.audit('key.created', `${accessKey} (${normalized.role})`);
     return { id, accessKey, secretKey };
   }
   revokeKey(id, owner) {
