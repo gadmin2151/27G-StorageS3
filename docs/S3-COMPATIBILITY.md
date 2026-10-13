@@ -47,7 +47,7 @@ Virtual-hosted-style (`bucket.host/object`), AWS Signature V2, SigV4a, AWS STS �
 | Операция | Поддержка и ограничения |
 | --- | --- |
 | `ListBuckets` | Возвращает бакеты, доступные ключу; пагинация списка бакетов отсутствует |
-| `CreateBucket` | Создание бакета; пустое тело или базовый XML с `LocationConstraint`, совпадающим с регионом сервера |
+| `CreateBucket` | Создание бакета; пустое тело или базовый XML с `LocationConstraint`, совпадающим с регионом сервера. Повтор возвращает `409 BucketAlreadyOwnedByYou` после проверки прав; клиент может явно считать этот ответ успешным |
 | `HeadBucket`, `DeleteBucket` | Проверка существования и удаление пустого бакета |
 | `GetBucketLocation` | Возвращает регион; для `us-east-1` XML-значение пустое |
 | `ListObjects`, `ListObjectsV2` | `prefix`, `delimiter`, `max-keys` до 1000, `encoding-type=url`; V1: `marker`; V2: `continuation-token`, `start-after`, `fetch-owner` |
@@ -120,6 +120,20 @@ export AWS_PAGER=''
 ```
 
 Для внешнего сервера замените `S3_ENDPOINT` на HTTPS-адрес. Если сертификат выдан вашей CA, настройте доверие клиента через `AWS_CA_BUNDLE`; проверка сертификата должна оставаться включённой.
+
+### Встроенный клиент `27g`
+
+Образ 0.3.4 / текущая сборка из исходников включает команду для повторяемой инициализации бакетов:
+
+```sh
+27g create-bucket "my-bucket" --if-not-exists
+27g create-bucket "my-bucket-2" --if-not-exists
+27g create-bucket "my-bucket-3" --if-not-exists
+```
+
+Это собственный клиент проекта, не MinIO `mc`. Он использует `S3_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` и `AWS_REGION` / `AWS_DEFAULT_REGION` (по умолчанию `us-east-1`). Пару ключей можно передать через `AWS_ACCESS_KEY_ID_FILE` / `AWS_SECRET_ACCESS_KEY_FILE`. Клиент подписывает обычный `CreateBucket` через SigV4; постоянные S3-ключи обязательны. Нужны разрешение `createBucket`, роль `readwrite`, допустимое имя в ограничениях ключа и отсутствие ограничений по префиксам.
+
+Флаг `--if-not-exists` (также `--if-no-exists`) принимает только `409 BucketAlreadyOwnedByYou` как успешный повтор. Он не скрывает `AccessDenied`, сбой связи или другие ошибки и не меняет политику, квоты или содержимое существующего бакета. Без флага повтор возвращает ненулевой код. В исходниках команда вызывается как `node src/cli.mjs create-bucket ...`; справка — `27g --help`. [Полные примеры Docker и Compose, параметры и выдача ключа](INITIALIZATION.ru.md#повторяемая-инициализация-бакетов-через-27g).
 
 ### Python / boto3
 
