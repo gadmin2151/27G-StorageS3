@@ -90,6 +90,8 @@ jobs:
         run: |
           node scripts/generate-installers.mjs --check
           for script in scripts/*.sh; do bash -n "$script"; done
+          sh -n scripts/27g
+          sh -n docs/examples/init-buckets.sh
           for script in src/*.mjs web/*.js; do node --check "$script"; done
           git diff --check
       - name: Compose configurations
@@ -104,6 +106,7 @@ jobs:
           docker compose -f compose.yaml -f compose.https.yaml config --quiet
           docker compose -f compose.yaml -f compose.disks.yaml config --quiet
           docker compose -f compose.yaml -f compose.init.yaml config --quiet
+          AWS_ACCESS_KEY_ID=compose-validation-only docker compose -f compose.yaml -f compose.buckets-init.yaml config --quiet
       - name: Reproducible allowlisted release archive
         run: |
           version="v$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')"
@@ -119,6 +122,10 @@ jobs:
           test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/README.ru.md"
           test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/compose.init.yaml"
           test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/docs/INITIALIZATION.md"
+          test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/compose.buckets-init.yaml"
+          test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/src/cli.mjs"
+          test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/scripts/27g"
+          test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/docs/examples/init-buckets.sh"
           test -s "$RUNNER_TEMP/release-one/install.sh"
           test -s "$RUNNER_TEMP/release-one/install-ru.sh"
           test -f "$RUNNER_TEMP/release-check/27g-storage-s3-$version/web/brand-mark.png"
