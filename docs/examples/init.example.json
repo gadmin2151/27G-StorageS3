@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "users": [
+    { "username": "admin", "role": "admin", "language": "en" },
+    { "username": "uploader", "role": "operator", "language": "en" }
+  ],
+  "buckets": [
+    { "name": "app-data", "quotaBytes": 10737418240, "quotaObjects": 10000, "access": { "mode": "private", "readPrefixes": [] } },
+    { "name": "public-media", "access": { "mode": "public-read", "readPrefixes": ["images/"] } }
+  ],
+  "keys": [
+    { "label": "Application uploads", "owner": "uploader", "buckets": ["app-data"], "permissions": ["read", "list", "write"] }
+  ]
+}
