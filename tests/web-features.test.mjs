@@ -5,7 +5,25 @@ import { createFeatures } from '../web/features.js';
 import { setLanguage } from '../web/i18n.js';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
-async function until(predicate) { for (let n=0;n<200;n++) { if(predicate())return; await tick(); } assert.fail('UI task did not settle'); }
+async function settledUpload(item, expectedStatus) {
+  let timer;
+  try {
+    await Promise.race([
+      (async () => {
+        let runner;
+        // Resume can replace the cancelled runner from its finally block.
+        // Await actual work, including WebCrypto, instead of counting event-loop turns.
+        do {
+          runner = item.runPromise;
+          assert.ok(runner, 'Upload runner was not started');
+          await runner;
+        } while (item.runPromise !== runner);
+      })(),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('UI upload did not settle')), 5000); }),
+    ]);
+  } finally { clearTimeout(timer); }
+  assert.equal(item.status, expectedStatus);
+}
 const deferred=()=>{let resolve;const promise=new Promise(done=>resolve=done);return {promise,resolve};};
 
 function harness(t) {
@@ -33,7 +51,7 @@ test('multipart immediate resume waits for cancelled hash runner and starts only
   await features.enqueueFiles([file]);await entered.promise;
   const item=state.uploads[0];features.pauseAll();await features.click('upload-resume',{dataset:{upload:item.clientId}});
   assert.equal(calls.filter(call=>call.path==='/api/uploads'&&call.method==='POST').length,0);
-  gate.resolve();await until(()=>item.status==='done');
+  gate.resolve();await settledUpload(item,'done');
   assert.equal(calls.filter(call=>call.path==='/api/uploads'&&call.method==='POST').length,1);
   assert.equal(calls.filter(call=>call.part).length,1);
   assert.equal(calls.filter(call=>call.path?.includes('/complete')).length,1);
@@ -46,7 +64,7 @@ test('multipart verifies stored part hashes and skips matching parts on resume',
   const file=new File(['trusted content'],'file.txt',{type:'text/plain'});
   parts.set(1,{partNumber:1,etag:'"existing"',sha256:createHash('sha256').update('trusted content').digest('hex'),size:file.size});
   const item=state.uploads[0];item.file=file;
-  await features.click('upload-resume',{dataset:{upload:item.id}});await until(()=>item.status==='done');
+  await features.click('upload-resume',{dataset:{upload:item.id}});await settledUpload(item,'done');
   assert.equal(calls.filter(call=>call.part).length,0);
   assert.deepEqual(calls.find(call=>call.path?.includes('/complete')).body.parts,[{partNumber:1,etag:'"existing"'}]);
 });
@@ -56,7 +74,7 @@ test('multipart rejects a changed source before upload and clears prior user que
   setServerUploads([{bucket:'photos',key:'file.txt',uploadId:'saved-upload',owner:'alice'}]);await features.restoreUploads();
   parts.set(1,{partNumber:1,etag:'"existing"',sha256:'0'.repeat(64),size:5});
   const item=state.uploads[0];item.file=new File(['other'],'file.txt');
-  await features.click('upload-resume',{dataset:{upload:item.id}});await until(()=>item.status==='error');
+  await features.click('upload-resume',{dataset:{upload:item.id}});await settledUpload(item,'error');
   assert.match(item.error,/does not match/);assert.equal(calls.filter(call=>call.part||call.path?.includes('/complete')).length,0);
   state.uploads.push({id:'completed',key:'private-name',status:'done'});state.user='bob';setServerUploads([]);await features.restoreUploads();assert.deepEqual(state.uploads,[]);
 });
