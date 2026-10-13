@@ -22,7 +22,7 @@
 
 27G-StorageS3 brings everyday file operations and storage administration into one web console. Upload a photo, create an expiring link, restore an earlier version, or connect another server. Designed for home labs, development and pilot deployments on your own infrastructure.
 
-> **Status: experimental version 0.3.3.** The S3 API is partially implemented. Read the [limitations](#current-limitations) and [compatibility matrix](docs/S3-COMPATIBILITY.md) before using it for critical data.
+> **Status: experimental version 0.3.4.** The S3 API is partially implemented. Read the [limitations](#current-limitations) and [compatibility matrix](docs/S3-COMPATIBILITY.md) before using it for critical data.
 
 The console starts in **English**. After signing in, open **Settings → Language**, select **Русский**, and save to use Russian. Your choice is stored in your account and follows you when you sign in on another device. Other users keep their own preferences.
 
@@ -86,7 +86,7 @@ docker run -d --name 27g-storage-s3 --restart unless-stopped --init \
   -p 127.0.0.1:9000:9000 \
   --mount type=volume,src=27g-storage-s3-data,dst=/data \
   -e INIT_BUCKET=app-data \
-  ghcr.io/gadmin2151/27g-storage-s3:0.3.3
+  ghcr.io/gadmin2151/27g-storage-s3:0.3.4
 ```
 
 Open [http://127.0.0.1:9000/console/](http://127.0.0.1:9000/console/), then read your generated credentials:
@@ -98,6 +98,18 @@ docker exec 27g-storage-s3 cat /data/init-credentials.json
 This creates `admin` with a random password, a private `app-data` bucket and a bucket-scoped S3 access key + secret key. The administrator signs in with that password without a setup token. Initialization is recorded on the persistent volume; restarting does not reset credentials or settings. Objects and databases are not copied.
 
 For several users, buckets, quotas, public-read policies or supplied secret files, see [first-start configuration](docs/INITIALIZATION.md), including the source-based Compose/init-container option. This manual deployment is separate from the installation wizard and its managed-update procedure. Keep the same volume during maintenance; use the wizard's update process for an existing wizard installation.
+
+### Repeatable bucket initialization
+
+In 0.3.4 / the current source build, the included `27g` S3 client can create a list of buckets on a running server:
+
+```sh
+27g create-bucket "my-bucket" --if-not-exists
+27g create-bucket "my-bucket-2" --if-not-exists
+27g create-bucket "my-bucket-3" --if-not-exists
+```
+
+Existing buckets are kept unchanged; `--if-no-exists` also works. Set the endpoint and a dedicated S3 key with `createBucket` permission. The key produced by `INIT_BUCKET=app-data` only allows that one bucket. See [credentials, Docker and a repeatable Compose init job](docs/INITIALIZATION.md#repeatable-bucket-initialization-with-27g), plus the [ready script](docs/examples/init-buckets.sh).
 
 ## The console in action
 

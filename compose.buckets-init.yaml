@@ -1,0 +1,37 @@
+# Optional repeatable S3 bucket commands AFTER app startup.
+# Uses an explicitly supplied S3 key; never mounts the coordinator's data volume.
+# See docs/INITIALIZATION.md / docs/INITIALIZATION.ru.md.
+services:
+  bucket-init:
+    image: 27g-storeges3:local
+    build: .
+    command: [sh, /run/init-buckets.sh]
+    init: true
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:size=16m,mode=1777]
+    pids_limit: 64
+    mem_limit: 128m
+    networks: [storage]
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      S3_ENDPOINT: http://app:9000
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?Set the access key for bucket initialization}
+      AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/bucket_init_secret
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+    secrets: [bucket_init_secret]
+    volumes:
+      - type: bind
+        source: ./docs/examples/init-buckets.sh
+        target: /run/init-buckets.sh
+        read_only: true
+        bind:
+          create_host_path: false
+
+secrets:
+  bucket_init_secret:
+    file: ${BUCKET_INIT_SECRET_FILE:-./secrets/bucket-init-secret}
