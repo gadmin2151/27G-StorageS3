@@ -101,7 +101,7 @@ For several users, buckets, quotas, public-read policies or supplied secret file
 
 ### Repeatable bucket initialization
 
-In 0.3.4 / the current source build, the included `27g` S3 client can create a list of buckets on a running server:
+Starting with 0.3.4, the Docker image includes the `27g` S3 client for creating a list of buckets on a running server:
 
 ```sh
 27g create-bucket "my-bucket" --if-not-exists
@@ -226,7 +226,7 @@ node --test tests/*.test.mjs
 docker compose config --quiet
 ```
 
-Version 0.3.3 passed **180/180 local tests without skips**. HA tests need real etcd: set `ETCD_BINARY=/path/to/etcd`; without it some checks are skipped. The successful [0.3.3 release workflow](https://github.com/gadmin2151/27G-StorageS3/actions/runs/38354393979) repeated the tests, verified first-start initialization, S3 credentials, same-volume restarts and installer updates using real Docker, and published images for both architectures. Functional checks do not replace load testing and auditing. Verification details are recorded in [project context](docs/PROJECT_MEMORY.md).
+Version 0.3.4 passed **195/195 local tests without skips**. HA tests need real etcd: set `ETCD_BINARY=/path/to/etcd`; without it some checks are skipped. The successful [0.3.4 release workflow](https://github.com/gadmin2151/27G-StorageS3/actions/runs/38360223798) repeated the tests, verified first-start initialization, repeatable CLI bucket commands, S3 credentials, same-volume restarts and installer updates using real Docker, and published images for both architectures. Functional checks do not replace load testing and auditing. Verification details are recorded in [project context](docs/PROJECT_MEMORY.md).
 
 To continue on another device, open the repository and start with `AGENTS.md` and `docs/PROJECT_MEMORY.md`. Git carries source code and project context; storage data and secrets are transferred separately.
 
