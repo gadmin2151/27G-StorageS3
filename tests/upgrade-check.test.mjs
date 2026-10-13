@@ -8,6 +8,7 @@ import { Storage } from '../src/storage.mjs';
 import { Auth } from '../src/auth.mjs';
 import { Shares } from '../src/shares.mjs';
 import { checkStorage } from '../scripts/check-storage.mjs';
+import { initializeSystem } from '../src/bootstrap.mjs';
 
 async function fixture(t) {
   const dataDir = await mkdtemp(join(tmpdir(), '27g-upgrade-check-'));
@@ -31,6 +32,22 @@ test('upgrade preflight reads metadata only, leaving databases and a sparse TB b
   assert.deepEqual(await Promise.all(files.map(file => readFile(join(dir, file)))), before);
   const afterBlob = await stat(blob);
   for (const key of ['ino', 'size', 'blocks', 'mtimeMs', 'atimeMs']) assert.equal(afterBlob[key], beforeBlob[key], key);
+});
+
+test('completed initial migration remains compatible with the no-copy format-1 upgrade check', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), '27g-upgrade-init-'));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const storage = await new Storage({ dataDir }).init(), auth = new Auth({ dataDir });
+  const shares = new Shares({ dataDir });
+  try { await initializeSystem({ auth, storage, env: { INIT_BUCKET: 'app-files' } }); }
+  finally { await storage.close(); auth.close(); shares.close(); }
+  const names = await readdir(dataDir);
+  const files = ['catalog.sqlite', 'auth.sqlite', 'shares.sqlite', 'master.key', 'setup.token', 'init-credentials.json'];
+  const before = await Promise.all(files.map(file => readFile(join(dataDir, file))));
+  const checked = await checkStorage(dataDir);
+  assert.equal(checked.ok, true); assert.equal(checked.objectsScanned, 0);
+  assert.deepEqual(await readdir(dataDir), names);
+  assert.deepEqual(await Promise.all(files.map(file => readFile(join(dataDir, file)))), before);
 });
 
 test('upgrade preflight rejects a running coordinator and an uncheckpointed WAL', async t => {
