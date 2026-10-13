@@ -1,6 +1,7 @@
 .git
 data
 secrets
+init-credentials.json
 .env
 *.log
 node_modules

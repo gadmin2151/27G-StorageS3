@@ -22,7 +22,7 @@
 
 27G-StorageS3 brings everyday file operations and storage administration into one web console. Upload a photo, create an expiring link, restore an earlier version, or connect another server. Designed for home labs, development and pilot deployments on your own infrastructure.
 
-> **Status: experimental version 0.3.2.** The S3 API is partially implemented. Read the [limitations](#current-limitations) and [compatibility matrix](docs/S3-COMPATIBILITY.md) before using it for critical data.
+> **Status: experimental version 0.3.3.** The S3 API is partially implemented. Read the [limitations](#current-limitations) and [compatibility matrix](docs/S3-COMPATIBILITY.md) before using it for critical data.
 
 The console starts in **English**. After signing in, open **Settings → Language**, select **Русский**, and save to use Russian. Your choice is stored in your account and follows you when you sign in on another device. Other users keep their own preferences.
 
@@ -74,6 +74,30 @@ Then open the local console address above. For public access, configure DNS, HTT
 Run either installation command again. The wizard detects an installation it created and offers a compatible update: **the same Docker volume is retained; objects and databases are not copied**. Terabytes of stored files do not need to be duplicated during an update.
 
 The container is briefly stopped. Releases with an incompatible storage contract are rejected before shutdown; a failed startup can revert to the previous image. This process supports single-server installations created by the wizard. Manual and HA deployments are maintained separately. [Options and update procedure →](docs/INSTALLATION.md) (Russian)
+
+### Automatic init in one command
+
+For a **new single-server installation** with Docker Engine already installed, the prebuilt image initializes itself before starting. No source checkout or separate init container is needed:
+
+```sh
+docker run -d --name 27g-storage-s3 --restart unless-stopped --init \
+  --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+  --tmpfs /tmp:size=64m,mode=1777 --stop-timeout 35 \
+  -p 127.0.0.1:9000:9000 \
+  --mount type=volume,src=27g-storage-s3-data,dst=/data \
+  -e INIT_BUCKET=app-data \
+  ghcr.io/gadmin2151/27g-storage-s3:0.3.3
+```
+
+Open [http://127.0.0.1:9000/console/](http://127.0.0.1:9000/console/), then read your generated credentials:
+
+```sh
+docker exec 27g-storage-s3 cat /data/init-credentials.json
+```
+
+This creates `admin` with a random password, a private `app-data` bucket and a bucket-scoped S3 access key + secret key. The administrator signs in with that password without a setup token. Initialization is recorded on the persistent volume; restarting does not reset credentials or settings. Objects and databases are not copied.
+
+For several users, buckets, quotas, public-read policies or supplied secret files, see [first-start configuration](docs/INITIALIZATION.md), including the source-based Compose/init-container option. This manual deployment is separate from the installation wizard and its managed-update procedure. Keep the same volume during maintenance; use the wizard's update process for an existing wizard installation.
 
 ## The console in action
 
@@ -163,6 +187,7 @@ The console includes an English and Russian Wiki. Detailed repository guides bel
 | Task | Guide |
 |:---|:---|
 | Install, configure or update | [Installation and updates](docs/INSTALLATION.md) |
+| Create users, S3 keys and buckets at first start | [First-start configuration](docs/INITIALIZATION.md) |
 | Work with files, clusters, domains and HTTPS | [Operations](docs/OPERATIONS.md) |
 | Connect an SDK or S3 client | [S3 compatibility and examples](docs/S3-COMPATIBILITY.md) |
 | Connect a disk, SMB/CIFS, NFS or another server | [Disks and agent](docs/DISKS.md) |

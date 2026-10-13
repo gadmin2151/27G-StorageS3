@@ -1,0 +1,37 @@
+# Optional FIRST-START overlay for compose.yaml; see docs/INITIALIZATION.md.
+# Subsequent starts use compose.yaml alone, with the same project and volume.
+services:
+  init:
+    image: 27g-storeges3:local
+    build: .
+    command: [node, src/server.mjs, --init-only]
+    init: true
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:size=64m,mode=1777]
+    pids_limit: 128
+    mem_limit: 768m
+    stop_grace_period: 35s
+    network_mode: none
+    environment:
+      DATA_DIR: /data
+      INIT_ENABLED: ${INIT_ENABLED:-true}
+      INIT_CONFIG_FILE: ${INIT_CONFIG_FILE:-}
+      INIT_ADMIN_USERNAME: ${INIT_ADMIN_USERNAME:-}
+      INIT_ADMIN_PASSWORD: ${INIT_ADMIN_PASSWORD:-}
+      INIT_ADMIN_PASSWORD_FILE: ${INIT_ADMIN_PASSWORD_FILE:-}
+      INIT_BUCKET: ${INIT_BUCKET:-}
+      INIT_BUCKET_ACCESS: ${INIT_BUCKET_ACCESS:-}
+      INIT_BUCKET_READ_PREFIXES: ${INIT_BUCKET_READ_PREFIXES:-}
+      INIT_BUCKET_QUOTA_BYTES: ${INIT_BUCKET_QUOTA_BYTES:-}
+      INIT_BUCKET_QUOTA_OBJECTS: ${INIT_BUCKET_QUOTA_OBJECTS:-}
+      INIT_S3_ACCESS_KEY: ${INIT_S3_ACCESS_KEY:-}
+      INIT_S3_SECRET_KEY: ${INIT_S3_SECRET_KEY:-}
+      INIT_S3_SECRET_KEY_FILE: ${INIT_S3_SECRET_KEY_FILE:-}
+    volumes: [coordinator:/data]
+  app:
+    depends_on:
+      init:
+        condition: service_completed_successfully

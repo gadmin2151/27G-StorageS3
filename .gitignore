@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 /secrets/
+init-credentials.json
 node_modules/
 .codex/
 .agents/
