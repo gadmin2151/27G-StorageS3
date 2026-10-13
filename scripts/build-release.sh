@@ -11,7 +11,7 @@ commit=$(git rev-parse --verify --end-of-options "${ref}^{commit}")
 package_version=$(git show "$commit:package.json" | node --input-type=module -e 'let s="";for await(const p of process.stdin)s+=p;process.stdout.write(JSON.parse(s).version)')
 [[ "$version" == "v$package_version" ]] || { echo 'Tag and committed package.json version must match.' >&2; exit 1; }
 node scripts/generate-installers.mjs --check --ref "$commit"
-paths=(package.json Dockerfile Dockerfile.disk-agent src web scripts README.md README.ru.md AGENTS.md docs .dockerignore .env.example Caddyfile Caddyfile.ha compose.yaml compose.init.yaml compose.node.yaml compose.https.yaml compose.ha.yaml compose.disks.yaml)
+paths=(package.json Dockerfile Dockerfile.disk-agent src web scripts README.md README.ru.md AGENTS.md docs .dockerignore .env.example Caddyfile Caddyfile.ha compose.yaml compose.init.yaml compose.buckets-init.yaml compose.node.yaml compose.https.yaml compose.ha.yaml compose.disks.yaml)
 for path in LICENSE LICENSE.md; do
   if git cat-file -e "$commit:$path" 2>/dev/null; then paths+=("$path"); fi
 done

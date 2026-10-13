@@ -48,6 +48,9 @@ check_app() {
 import assert from 'node:assert/strict';
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import { createHash, createHmac } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+const exec = promisify(execFile);
 const first=process.env.SMOKE_PHASE==='first',base='http://127.0.0.1:9000',bucket='bootstrap-ci';
 const payload='bootstrap container persistence check\n',changedPassword='bootstrap-ci-updated-password';
 const bytes=await readFile('/data/init-credentials.json'),file=await stat('/data/init-credentials.json');
@@ -66,8 +69,9 @@ assert.equal(response.status,200);cookie=response.headers.get('set-cookie').spli
 response=await api('/users');assert.equal(response.status,200);const users=await response.json();
 assert.equal(users.users.length,1);assert.equal(users.users[0].username,'ci-admin');
 response=await api('/buckets');assert.equal(response.status,200);const buckets=(await response.json()).buckets;
-assert.equal(buckets.length,1);assert.equal(buckets[0].name,bucket);
-assert.equal(buckets[0].quotaBytes,first?1048576:2097152);assert.equal(buckets[0].quotaObjects,first?10:20);
+assert.equal(buckets.length,first?1:4);const originalBucket=buckets.find(item=>item.name===bucket);assert.ok(originalBucket);
+assert.equal(originalBucket.quotaBytes,first?1048576:2097152);assert.equal(originalBucket.quotaObjects,first?10:20);
+if(!first) for(const name of ['cli-bucket','cli-bucket-2','cli-bucket-3']) assert.ok(buckets.some(item=>item.name===name));
 response=await api('/bucket-access?bucket='+bucket);assert.equal(response.status,200);const access=await response.json();
 assert.equal(access.mode,first?'public-read':'private');assert.deepEqual(access.readPrefixes,first?['public/']:[]);assert.equal(access.anonymousList,false);
 const hash=value=>createHash('sha256').update(value).digest('hex'),hmac=(secret,value)=>createHmac('sha256',secret).update(value).digest();
@@ -84,7 +88,26 @@ if(first){response=await fetch(base+objectPath,{method:'PUT',headers:signed('PUT
 response=await fetch(base+objectPath,{headers:signed('GET',objectPath)});assert.equal(response.status,200);assert.equal(await response.text(),payload);
 response=await fetch(base+objectPath);assert.equal(response.status,first?200:403);await response.arrayBuffer();
 response=await fetch(base+'/'+bucket);assert.equal(response.status,403);await response.arrayBuffer();
+// The packaged executable uses S3 even when run beside the coordinator. No
+// second SQLite process is allowed on the active data volume.
+const cliEnv={PATH:process.env.PATH,S3_ENDPOINT:base,AWS_ACCESS_KEY_ID:key.accessKey,AWS_SECRET_ACCESS_KEY:key.secretKey};
+let cli=await exec('27g',['create-bucket',bucket,'--if-no-exists'],{env:cliEnv});
+assert.match(cli.stdout,/already exists/i);
+assert.ok(!cli.stdout.includes(key.secretKey)&&!cli.stderr.includes(key.secretKey));
 if(first){
+ response=await api('/keys','POST',{label:'CI bucket initialization',role:'readwrite',buckets:['cli-bucket','cli-bucket-2','cli-bucket-3'],permissions:['createBucket']});
+ assert.equal(response.status,201);const initKey=await response.json();
+ const initEnv={...cliEnv,AWS_ACCESS_KEY_ID:initKey.accessKey,AWS_SECRET_ACCESS_KEY:initKey.secretKey};
+ const script='set -eu\n27g create-bucket "cli-bucket" --if-not-exists\n27g create-bucket "cli-bucket-2" --if-not-exists\n27g create-bucket "cli-bucket-3" --if-not-exists';
+ for(let attempt=0;attempt<2;attempt++){
+  cli=await exec('sh',['-c',script],{env:initEnv});
+  assert.ok(!cli.stdout.includes(initKey.secretKey)&&!cli.stderr.includes(initKey.secretKey));
+ }
+ await assert.rejects(exec('27g',['create-bucket','cli-bucket'],{env:initEnv}),error=>error.code===1);
+ await assert.rejects(exec('27g',['create-bucket',bucket,'--if-not-exists'],{env:initEnv}),error=>error.code===1);
+ for(const name of ['cli-bucket','cli-bucket-2','cli-bucket-3']){
+  response=await api('/bucket-access?bucket='+name);assert.equal(response.status,200);assert.equal((await response.json()).mode,'private');
+ }
  response=await api('/bucket-access?bucket='+bucket,'PUT',{mode:'private',readPrefixes:[]});assert.equal(response.status,200);await response.arrayBuffer();
  response=await api('/bucket-quota?bucket='+bucket,'PUT',{maxBytes:2097152,maxObjects:20});assert.equal(response.status,200);await response.arrayBuffer();
  response=await api('/password','PUT',{currentPassword:user.password,password:changedPassword});assert.equal(response.status,200);await response.arrayBuffer();
@@ -110,4 +133,4 @@ docker restart -t 40 "$app" >/dev/null
 wait_ready
 check_app restart
 check_no_secrets
-printf 'Bootstrap container smoke passed: one-shot initialization and persistent, unchanged credentials on restart.\n'
+printf 'Bootstrap container smoke passed: one-shot initialization, repeatable CLI bucket commands and persistent credentials on restart.\n'

@@ -1,0 +1,3 @@
+#!/bin/sh
+# The client uses authenticated S3 requests; it never opens the data volume.
+exec node /app/src/cli.mjs "$@"
